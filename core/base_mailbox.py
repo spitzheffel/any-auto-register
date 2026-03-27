@@ -85,9 +85,17 @@ def _create_tempmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
 
 def _create_duckmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
     return DuckMailMailbox(
-        api_url=extra.get("duckmail_api_url", "https://www.duckmail.sbs"),
-        provider_url=extra.get("duckmail_provider_url", "https://api.duckmail.sbs"),
-        bearer=extra.get("duckmail_bearer", "kevin273945"),
+        api_url=_normalize_api_base_url(
+            extra.get("duckmail_api_url"),
+            default="https://www.duckmail.sbs",
+            label="DuckMail Web URL",
+        ),
+        provider_url=_normalize_api_base_url(
+            extra.get("duckmail_provider_url"),
+            default="https://api.duckmail.sbs",
+            label="DuckMail Provider URL",
+        ),
+        bearer=str(extra.get("duckmail_bearer", "") or "kevin273945"),
         proxy=proxy,
     )
 
@@ -479,8 +487,13 @@ class DuckMailMailbox(BaseMailbox):
         self._address = None
 
     def _common_headers(self) -> dict:
+        token = str(self.bearer or "").strip()
+        if token.lower().startswith("bearer "):
+            auth_header = token
+        else:
+            auth_header = f"Bearer {token}"
         return {
-            "authorization": f"Bearer {self.bearer}",
+            "authorization": auth_header,
             "content-type": "application/json",
             "x-api-provider-base-url": self.provider_url,
         }

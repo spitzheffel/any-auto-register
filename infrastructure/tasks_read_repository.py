@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from application.tasks import get_task, list_task_events, list_tasks
+from core.datetime_utils import ensure_utc_datetime
 from domain.tasks import TaskEvent, TaskProgress, TaskSummary
 
 
@@ -21,10 +22,10 @@ def _to_task_summary(data: dict) -> TaskSummary:
         errors=list(data.get("errors", [])),
         cashier_urls=list(data.get("cashier_urls", [])),
         error=str(data.get("error", "")),
-        created_at=data.get("created_at"),
-        started_at=data.get("started_at"),
-        finished_at=data.get("finished_at"),
-        updated_at=data.get("updated_at"),
+        created_at=ensure_utc_datetime(data.get("created_at")),
+        started_at=ensure_utc_datetime(data.get("started_at")),
+        finished_at=ensure_utc_datetime(data.get("finished_at")),
+        updated_at=ensure_utc_datetime(data.get("updated_at")),
         result=dict(data.get("result", {}) or {}),
     )
 
@@ -38,7 +39,7 @@ def _to_event(data: dict) -> TaskEvent:
         message=data.get("message", ""),
         line=data.get("line", ""),
         detail=dict(data.get("detail", {}) or {}),
-        created_at=data.get("created_at"),
+        created_at=ensure_utc_datetime(data.get("created_at")),
     )
 
 

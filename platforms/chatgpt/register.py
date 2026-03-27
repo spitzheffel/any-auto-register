@@ -3,6 +3,8 @@
 从 main.py 中提取并重构的注册流程
 """
 
+from __future__ import annotations
+
 import re
 import json
 import time
@@ -34,6 +36,15 @@ from .constants import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _load_legacy_db_helpers():
+    try:
+        from ..database import crud  # type: ignore
+        from ..database.session import get_db  # type: ignore
+        return crud, get_db
+    except Exception:
+        return None, None
 
 
 @dataclass
@@ -149,8 +160,10 @@ class RegistrationEngine:
         # 记录到数据库（如果有关联任务）
         if self.task_uuid:
             try:
-                with get_db() as db:
-                    crud.append_task_log(db, self.task_uuid, message)
+                crud, get_db = _load_legacy_db_helpers()
+                if crud and get_db:
+                    with get_db() as db:
+                        crud.append_task_log(db, self.task_uuid, message)
             except Exception as e:
                 logger.warning(f"记录任务日志失败: {e}")
 
@@ -375,6 +388,9 @@ class RegistrationEngine:
     def _mark_email_as_registered(self):
         """标记邮箱为已注册状态（用于防止重复尝试）"""
         try:
+            crud, get_db = _load_legacy_db_helpers()
+            if not crud or not get_db:
+                return
             with get_db() as db:
                 # 检查是否已存在该邮箱的记录
                 existing = crud.get_account_by_email(db, self.email)

@@ -1,7 +1,15 @@
 """OpenAI 专用 HTTP 客户端"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Dict, Optional, Tuple
+
+from curl_cffi import requests as cffi_requests
+
 from core.http_client import HTTPClient, HTTPClientError, RequestConfig
 from .constants import ERROR_MESSAGES
-import logging
+
 logger = logging.getLogger(__name__)
 
 class OpenAIHTTPClient(HTTPClient):
@@ -58,14 +66,19 @@ class OpenAIHTTPClient(HTTPClient):
             loc_match = re.search(r"loc=([A-Z]+)", trace_text)
             loc = loc_match.group(1) if loc_match else None
 
-            # 检查是否支持
+            # 无法判断地区时不阻断注册流程，只记录告警。
+            if not loc:
+                logger.warning("未能解析 IP 地理位置，跳过地区限制检查")
+                return True, None
+
+            # 仅在明确命中限制地区时拦截。
             if loc in ["CN", "HK", "MO", "TW"]:
                 return False, loc
             return True, loc
 
         except Exception as e:
-            logger.error(f"检查 IP 地理位置失败: {e}")
-            return False, None
+            logger.warning(f"检查 IP 地理位置失败，跳过地区限制检查: {e}")
+            return True, None
 
     def send_openai_request(
         self,
