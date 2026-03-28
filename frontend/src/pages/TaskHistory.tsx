@@ -10,8 +10,11 @@ import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3 } from 'lucide
 
 export default function TaskHistory() {
   const [tasks, setTasks] = useState<any[]>([])
+  const [total, setTotal] = useState(0)
   const [platform, setPlatform] = useState('')
   const [status, setStatus] = useState('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
   const [platforms, setPlatforms] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedTask, setSelectedTask] = useState<any | null>(null)
@@ -19,15 +22,16 @@ export default function TaskHistory() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: '1', page_size: '50' })
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
       if (platform) params.set('platform', platform)
       if (status) params.set('status', status)
       const data = await apiFetch(`/tasks?${params}`)
       setTasks(data.items || [])
+      setTotal(Number(data.total || 0))
     } finally {
       setLoading(false)
     }
-  }, [platform, status])
+  }, [page, pageSize, platform, status])
 
   useEffect(() => {
     getPlatforms().then(data => setPlatforms(data || [])).catch(() => setPlatforms([]))
@@ -56,14 +60,15 @@ export default function TaskHistory() {
     load().catch(() => {})
   }, [load])
 
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const succeeded = tasks.filter(task => task.status === 'succeeded').length
   const failed = tasks.filter(task => task.status === 'failed').length
   const running = tasks.filter(task => ['running', 'claimed', 'pending', 'cancel_requested'].includes(task.status)).length
   const metricCards = [
-    { label: '任务数', value: tasks.length, icon: Activity, tone: 'text-[var(--accent)]' },
-    { label: '成功', value: succeeded, icon: CheckCircle2, tone: 'text-emerald-400' },
-    { label: '失败', value: failed, icon: AlertTriangle, tone: 'text-red-400' },
-    { label: '进行中', value: running, icon: Clock3, tone: 'text-amber-400' },
+    { label: '任务数', value: total, icon: Activity, tone: 'text-[var(--accent)]' },
+    { label: '本页成功', value: succeeded, icon: CheckCircle2, tone: 'text-emerald-400' },
+    { label: '本页失败', value: failed, icon: AlertTriangle, tone: 'text-red-400' },
+    { label: '本页进行中', value: running, icon: Clock3, tone: 'text-amber-400' },
   ]
 
   return (
@@ -80,8 +85,9 @@ export default function TaskHistory() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <div className="text-sm font-semibold text-[var(--text-primary)]">任务记录</div>
-            <Badge variant="default">任务 {tasks.length}</Badge>
+            <Badge variant="default">任务 {total}</Badge>
             <Badge variant="secondary">运行中 {running}</Badge>
+            <Badge variant="secondary">第 {page} / {totalPages} 页</Badge>
           </div>
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
             <RefreshCw className={`h-4 w-4 mr-1 ${loading ? 'animate-spin' : ''}`} />
@@ -115,7 +121,10 @@ export default function TaskHistory() {
           <div className="grid gap-3 md:grid-cols-[minmax(0,220px)_minmax(0,220px)_1fr]">
             <select
               value={platform}
-              onChange={e => setPlatform(e.target.value)}
+              onChange={e => {
+                setPage(1)
+                setPlatform(e.target.value)
+              }}
               className="control-surface appearance-none"
             >
               <option value="">全部平台</option>
@@ -125,7 +134,10 @@ export default function TaskHistory() {
             </select>
             <select
               value={status}
-              onChange={e => setStatus(e.target.value)}
+              onChange={e => {
+                setPage(1)
+                setStatus(e.target.value)
+              }}
               className="control-surface appearance-none"
             >
               <option value="">全部状态</option>
@@ -209,6 +221,42 @@ export default function TaskHistory() {
             ))}
           </tbody>
         </table>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-muted)]">
+            <span>共 {total} 条</span>
+            <span>当前第 {page} / {totalPages} 页</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={pageSize}
+              onChange={e => {
+                setPage(1)
+                setPageSize(Number(e.target.value))
+              }}
+              className="control-surface control-surface-compact appearance-none"
+            >
+              <option value={20}>每页 20 条</option>
+              <option value={50}>每页 50 条</option>
+              <option value={100}>每页 100 条</option>
+            </select>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setPage(current => Math.max(1, current - 1))}
+              disabled={page <= 1 || loading}
+            >
+              上一页
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setPage(current => Math.min(totalPages, current + 1))}
+              disabled={page >= totalPages || loading}
+            >
+              下一页
+            </Button>
+          </div>
         </div>
       </Card>
     </div>
