@@ -16,6 +16,7 @@ build/
 # 日志
 logs/
 *.log
+.run-logs/
 
 # 账号数据
 accounts.txt
