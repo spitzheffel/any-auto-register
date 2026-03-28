@@ -103,31 +103,34 @@ class TurnstileAPIServer:
 
     def display_welcome(self):
         """Displays welcome screen with logo."""
-        self.console.clear()
-        
-        combined_text = Text()
-        combined_text.append("\n📢 Channel: ", style="bold white")
-        combined_text.append("https://t.me/D3_vin", style="cyan")
-        combined_text.append("\n💬 Chat: ", style="bold white")
-        combined_text.append("https://t.me/D3vin_chat", style="cyan")
-        combined_text.append("\n📁 GitHub: ", style="bold white")
-        combined_text.append("https://github.com/D3-vin", style="cyan")
-        combined_text.append("\n📁 Version: ", style="bold white")
-        combined_text.append("1.2a", style="green")
-        combined_text.append("\n")
+        try:
+            self.console.clear()
 
-        info_panel = Panel(
-            Align.left(combined_text),
-            title="[bold blue]Turnstile Solver[/bold blue]",
-            subtitle="[bold magenta]Dev by D3vin[/bold magenta]",
-            box=box.ROUNDED,
-            border_style="bright_blue",
-            padding=(0, 1),
-            width=50
-        )
+            combined_text = Text()
+            combined_text.append("\n📢 Channel: ", style="bold white")
+            combined_text.append("https://t.me/D3_vin", style="cyan")
+            combined_text.append("\n💬 Chat: ", style="bold white")
+            combined_text.append("https://t.me/D3vin_chat", style="cyan")
+            combined_text.append("\n📁 GitHub: ", style="bold white")
+            combined_text.append("https://github.com/D3-vin", style="cyan")
+            combined_text.append("\n📁 Version: ", style="bold white")
+            combined_text.append("1.2a", style="green")
+            combined_text.append("\n")
 
-        self.console.print(info_panel)
-        self.console.print()
+            info_panel = Panel(
+                Align.left(combined_text),
+                title="[bold blue]Turnstile Solver[/bold blue]",
+                subtitle="[bold magenta]Dev by D3vin[/bold magenta]",
+                box=box.ROUNDED,
+                border_style="bright_blue",
+                padding=(0, 1),
+                width=50
+            )
+
+            self.console.print(info_panel)
+            self.console.print()
+        except UnicodeEncodeError:
+            print("Turnstile Solver | Channel: https://t.me/D3_vin | Chat: https://t.me/D3vin_chat | GitHub: https://github.com/D3-vin | Version: 1.2a")
 
 
 
@@ -293,6 +296,23 @@ class TurnstileAPIServer:
     async def _unblock_rendering(self, page):
         """Разблокировка рендеринга"""
         await page.unroute("**/*", self._optimized_route_handler)
+
+    async def _write_failure_artifacts(self, page, task_id: str) -> None:
+        artifact_dir = os.path.join(os.getcwd(), ".run-logs", "solver-artifacts")
+        os.makedirs(artifact_dir, exist_ok=True)
+        png_path = os.path.join(artifact_dir, f"{task_id}.png")
+        html_path = os.path.join(artifact_dir, f"{task_id}.html")
+        try:
+            await page.screenshot(path=png_path, full_page=True)
+        except Exception as exc:
+            logger.warning(f"Failed to save solver screenshot for task {task_id}: {exc}")
+        try:
+            content = await page.content()
+            with open(html_path, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(content)
+        except Exception as exc:
+            logger.warning(f"Failed to save solver html for task {task_id}: {exc}")
+        logger.warning(f"Saved solver artifacts for task {task_id}: {png_path} | {html_path}")
 
     async def _find_turnstile_elements(self, page, index: int):
         """Умная проверка всех возможных Turnstile элементов"""
@@ -606,9 +626,10 @@ class TurnstileAPIServer:
                 logger.debug(f"Browser {index}: Injected new CAPTCHA widget with sitekey: {websiteKey}")
         return result
 
-    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):
+    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None, proxy: Optional[str] = None):
         """Solve the Turnstile challenge."""
-        proxy = None
+        selected_proxy = (proxy or "").strip() or None
+        proxy_source = "request" if selected_proxy else "none"
 
         index, browser, browser_config = await self.browser_pool.get()
         
@@ -623,56 +644,63 @@ class TurnstileAPIServer:
             if self.debug:
                 logger.warning(f"Browser {index}: Cannot check browser state: {str(e)}")
 
-        if self.proxy_support:
+        if not selected_proxy and self.proxy_support:
             proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
 
             try:
                 with open(proxy_file_path) as proxy_file:
                     proxies = [line.strip() for line in proxy_file if line.strip()]
 
-                proxy = random.choice(proxies) if proxies else None
+                selected_proxy = random.choice(proxies) if proxies else None
+                proxy_source = "pool" if selected_proxy else "none"
                 
-                if self.debug and proxy:
-                    logger.debug(f"Browser {index}: Selected proxy: {proxy}")
-                elif self.debug and not proxy:
+                if self.debug and selected_proxy:
+                    logger.debug(f"Browser {index}: Selected proxy from proxies.txt: {selected_proxy}")
+                elif self.debug and not selected_proxy:
                     logger.debug(f"Browser {index}: No proxies available")
                     
             except FileNotFoundError:
                 logger.warning(f"Proxy file not found: {proxy_file_path}")
-                proxy = None
+                selected_proxy = None
+                proxy_source = "none"
             except Exception as e:
                 logger.error(f"Error reading proxy file: {str(e)}")
-                proxy = None
+                selected_proxy = None
+                proxy_source = "none"
 
-            if proxy:
-                if '@' in proxy:
-                    try:
-                        scheme_part, auth_part = proxy.split('://')
-                        auth, address = auth_part.split('@')
-                        username, password = auth.split(':')
-                        ip, port = address.split(':')
-                        if self.debug:
-                            logger.debug(f"Browser {index}: Creating context with proxy {scheme_part}://{ip}:{port} (auth: {username}:***)")
-                        context_options = {
-                            "proxy": {
-                                "server": f"{scheme_part}://{ip}:{port}",
-                                "username": username,
-                                "password": password
-                            },
-                            "user_agent": browser_config['useragent']
+        if self.debug:
+            logger.debug(f"Browser {index}: Turnstile proxy source={proxy_source}")
+
+        if selected_proxy:
+            if '@' in selected_proxy:
+                try:
+                    scheme_part, auth_part = selected_proxy.split('://')
+                    auth, address = auth_part.split('@')
+                    username, password = auth.split(':')
+                    ip, port = address.split(':')
+                    if self.debug:
+                        logger.debug(f"Browser {index}: Creating context with proxy {scheme_part}://{ip}:{port} (auth: {username}:***)")
+                    context_options = {
+                        "proxy": {
+                            "server": f"{scheme_part}://{ip}:{port}",
+                            "username": username,
+                            "password": password
+                        },
+                        "user_agent": browser_config['useragent']
+                    }
+                    
+                    if browser_config['sec_ch_ua'] and browser_config['sec_ch_ua'].strip():
+                        context_options['extra_http_headers'] = {
+                            'sec-ch-ua': browser_config['sec_ch_ua']
                         }
-                        
-                        if browser_config['sec_ch_ua'] and browser_config['sec_ch_ua'].strip():
-                            context_options['extra_http_headers'] = {
-                                'sec-ch-ua': browser_config['sec_ch_ua']
-                            }
-                        
-                        context = await browser.new_context(**context_options)
-                    except ValueError:
-                        raise ValueError(f"Invalid proxy format: {proxy}")
-                else:
-                    parts = proxy.split(':')
-                    if len(parts) == 5:
+                    
+                    context = await browser.new_context(**context_options)
+                except ValueError:
+                    raise ValueError(f"Invalid proxy format: {selected_proxy}")
+            else:
+                parts = selected_proxy.split(':')
+                if len(parts) == 5:
+                    try:
                         proxy_scheme, proxy_ip, proxy_port, proxy_user, proxy_pass = parts
                         if self.debug:
                             logger.debug(f"Browser {index}: Creating context with proxy {proxy_scheme}://{proxy_ip}:{proxy_port} (auth: {proxy_user}:***)")
@@ -691,34 +719,27 @@ class TurnstileAPIServer:
                             }
                         
                         context = await browser.new_context(**context_options)
-                    elif len(parts) == 3:
-                        if self.debug:
-                            logger.debug(f"Browser {index}: Creating context with proxy {proxy}")
-                        context_options = {
-                            "proxy": {"server": f"{proxy}"},
-                            "user_agent": browser_config['useragent']
-                        }
-                        
-                        if browser_config['sec_ch_ua'] and browser_config['sec_ch_ua'].strip():
-                            context_options['extra_http_headers'] = {
-                                'sec-ch-ua': browser_config['sec_ch_ua']
-                            }
-                        
-                        context = await browser.new_context(**context_options)
-                    else:
-                        raise ValueError(f"Invalid proxy format: {proxy}")
-            else:
-                if self.debug:
-                    logger.debug(f"Browser {index}: Creating context without proxy")
-                context_options = {"user_agent": browser_config['useragent']}
-                
-                if browser_config['sec_ch_ua'] and browser_config['sec_ch_ua'].strip():
-                    context_options['extra_http_headers'] = {
-                        'sec-ch-ua': browser_config['sec_ch_ua']
+                    except ValueError:
+                        raise ValueError(f"Invalid proxy format: {selected_proxy}")
+                elif len(parts) == 3:
+                    if self.debug:
+                        logger.debug(f"Browser {index}: Creating context with proxy {selected_proxy}")
+                    context_options = {
+                        "proxy": {"server": f"{selected_proxy}"},
+                        "user_agent": browser_config['useragent']
                     }
-                
-                context = await browser.new_context(**context_options)
+                    
+                    if browser_config['sec_ch_ua'] and browser_config['sec_ch_ua'].strip():
+                        context_options['extra_http_headers'] = {
+                            'sec-ch-ua': browser_config['sec_ch_ua']
+                        }
+                    
+                    context = await browser.new_context(**context_options)
+                else:
+                    raise ValueError(f"Invalid proxy format: {selected_proxy}")
         else:
+            if self.debug:
+                logger.debug(f"Browser {index}: Creating context without proxy")
             context_options = {"user_agent": browser_config['useragent']}
             
             if browser_config['sec_ch_ua'] and browser_config['sec_ch_ua'].strip():
@@ -755,7 +776,7 @@ class TurnstileAPIServer:
 
         try:
             if self.debug:
-                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | Proxy: {proxy}")
+                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | ProxySource: {proxy_source} | Proxy: {selected_proxy}")
                 logger.debug(f"Browser {index}: Setting up optimized page loading with resource blocking")
 
             if self.debug:
@@ -895,14 +916,17 @@ class TurnstileAPIServer:
                     continue
             
             elapsed_time = round(time.time() - start_time, 3)
+            await self._write_failure_artifacts(page, task_id)
             await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time})
-            if self.debug:
-                logger.error(f"Browser {index}: Error solving Turnstile in {COLORS.get('RED')}{elapsed_time}{COLORS.get('RESET')} Seconds")
+            logger.error(f"Browser {index}: Error solving Turnstile in {COLORS.get('RED')}{elapsed_time}{COLORS.get('RESET')} Seconds")
         except Exception as e:
             elapsed_time = round(time.time() - start_time, 3)
+            try:
+                await self._write_failure_artifacts(page, task_id)
+            except Exception:
+                pass
             await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time})
-            if self.debug:
-                logger.error(f"Browser {index}: Error solving Turnstile: {str(e)}")
+            logger.error(f"Browser {index}: Error solving Turnstile: {str(e)}")
         finally:
             if self.debug:
                 logger.debug(f"Browser {index}: Closing browser context and cleaning up")
@@ -938,6 +962,7 @@ class TurnstileAPIServer:
         sitekey = request.args.get('sitekey')
         action = request.args.get('action')
         cdata = request.args.get('cdata')
+        proxy = request.args.get('proxy')
 
         if not url or not sitekey:
             return jsonify({
@@ -953,11 +978,28 @@ class TurnstileAPIServer:
             "url": url,
             "sitekey": sitekey,
             "action": action,
-            "cdata": cdata
+            "cdata": cdata,
+            "proxy": proxy,
         })
+        logger.info(
+            "Accepted Turnstile task "
+            f"{task_id}: sitekey={sitekey[:16]}..., "
+            f"proxy={'request' if proxy else ('pool' if self.proxy_support else 'none')}, "
+            f"action={action or '-'}, "
+            f"cdata={'Y' if cdata else 'N'}"
+        )
 
         try:
-            asyncio.create_task(self._solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata))
+            asyncio.create_task(
+                self._solve_turnstile(
+                    task_id=task_id,
+                    url=url,
+                    sitekey=sitekey,
+                    action=action,
+                    cdata=cdata,
+                    proxy=proxy,
+                )
+            )
 
             if self.debug:
                 logger.debug(f"Request completed with taskid {task_id}.")

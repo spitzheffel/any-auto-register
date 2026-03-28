@@ -608,7 +608,7 @@ class OpenBlockLabsBrowserRegister:
 
             if not _wait_for_email_verification(page, timeout=5):
                 page.screenshot(path="/tmp/openblocks_password_fail.png")
-                with open("/tmp/openblocks_password_fail.html", "w") as f:
+                with open("/tmp/openblocks_password_fail.html", "w", encoding="utf-8", errors="replace") as f:
                     f.write(page.content())
                 raise RuntimeError(f"未进入验证码页面: {page.url}")
 
@@ -621,7 +621,7 @@ class OpenBlockLabsBrowserRegister:
             code = code.replace("-", "")
 
             page.screenshot(path="/tmp/openblocks_otp.png")
-            with open("/tmp/openblocks_otp.html", "w") as f:
+            with open("/tmp/openblocks_otp.html", "w", encoding="utf-8", errors="replace") as f:
                 f.write(page.content())
 
             try:
@@ -640,7 +640,7 @@ class OpenBlockLabsBrowserRegister:
             if not _wait_for_url(page, "dashboard.openblocklabs.com", timeout=60):
                 self.log("未跳转到 dashboard，保存截图到 /tmp/openblocks_fail.png")
                 page.screenshot(path="/tmp/openblocks_fail.png")
-                with open("/tmp/openblocks_fail.html", "w") as f:
+                with open("/tmp/openblocks_fail.html", "w", encoding="utf-8", errors="replace") as f:
                     f.write(page.content())
                 raise RuntimeError(f"OpenBlockLabs 注册后未跳转到 dashboard: {page.url}")
 
@@ -648,7 +648,7 @@ class OpenBlockLabsBrowserRegister:
             if not wos:
                 self.log("未获取到 wos_session，保存截图到 /tmp/openblocks_fail.png")
                 page.screenshot(path="/tmp/openblocks_fail.png")
-                with open("/tmp/openblocks_fail.html", "w") as f:
+                with open("/tmp/openblocks_fail.html", "w", encoding="utf-8", errors="replace") as f:
                     f.write(page.content())
                 raise RuntimeError("未获取到 wos-session cookie")
             self.log(f"注册成功: {email}")

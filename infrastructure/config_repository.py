@@ -16,7 +16,7 @@ class ConfigRepository:
         "moemail_api_url", "moemail_username", "moemail_password", "moemail_session_token",
         "mail_provider",
         "cfworker_api_url", "cfworker_admin_token", "cfworker_domain", "cfworker_fingerprint",
-        "cpa_api_url", "cpa_api_key",
+        "cpa_api_url", "cpa_api_key", "cpa_use_proxy",
         "team_manager_url", "team_manager_key",
     }
 

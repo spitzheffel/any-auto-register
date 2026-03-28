@@ -12,6 +12,7 @@ from application.tasks import (
     create_register_task,
     get_task,
     list_task_events,
+    retry_task,
     request_cancel,
 )
 from services.task_runtime import task_runtime
@@ -25,6 +26,15 @@ class TaskCommandsService:
 
     def cancel_task(self, task_id: str) -> dict | None:
         task = request_cancel(task_id)
+        if task:
+            task_runtime.cancel_task(task_id)
+            task_runtime.wake_up()
+            latest = get_task(task_id)
+            return latest or task
+        return None
+
+    def retry_task(self, task_id: str) -> dict | None:
+        task = retry_task(task_id)
         if task:
             task_runtime.wake_up()
         return task

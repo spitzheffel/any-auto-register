@@ -16,6 +16,10 @@ from infrastructure.accounts_repository import AccountsRepository
 
 CHATGPT_PLATFORM = "chatgpt"
 DEFAULT_CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+SUB2API_ACCOUNT_MODEL_MAPPING = {
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.3-codex": "gpt-5.3-codex",
+}
 
 
 @dataclass(slots=True)
@@ -84,6 +88,7 @@ def _chatgpt_export_payload(item: AccountRecord) -> dict:
         account_id = auth_info.get("chatgpt_account_id", "") or ""
     expires_at = None
     exp_timestamp = payload.get("exp")
+    iat_timestamp = payload.get("iat")
     if isinstance(exp_timestamp, int) and exp_timestamp > 0:
         expires_at = datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
 
@@ -100,11 +105,15 @@ def _chatgpt_export_payload(item: AccountRecord) -> dict:
         "session_token": session_token,
         "cookies": cookies,
         "email_service": email_service,
+        "chatgpt_user_id": auth_info.get("chatgpt_user_id", "") or auth_info.get("user_id", "") or "",
         "registered_at": _isoformat(item.created_at),
         "last_refresh": _isoformat(item.updated_at),
         "expires_at": _isoformat(expires_at),
         "status": item.display_status,
         "expires_at_unix": int(expires_at.timestamp()) if expires_at else 0,
+        "expires_in": (exp_timestamp - iat_timestamp)
+        if isinstance(exp_timestamp, int) and isinstance(iat_timestamp, int) and exp_timestamp >= iat_timestamp
+        else 0,
     }
 
 
@@ -158,6 +167,41 @@ def _make_sub2api_json(item: AccountRecord) -> dict:
                 "auto_pause_on_expired": True,
             }
         ],
+    }
+
+
+def _make_sub2api_account_entry(item: AccountRecord) -> dict:
+    payload = _chatgpt_export_payload(item)
+    return {
+        "name": payload["email"],
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": {
+            "access_token": payload["access_token"],
+            "chatgpt_account_id": payload["account_id"],
+            "chatgpt_user_id": payload["chatgpt_user_id"],
+            "client_id": payload["client_id"],
+            "expires_at": payload["expires_at_unix"],
+            "expires_in": payload["expires_in"],
+            "model_mapping": dict(SUB2API_ACCOUNT_MODEL_MAPPING),
+            "organization_id": "",
+            "refresh_token": payload["refresh_token"],
+        },
+        "extra": {
+            "email": payload["email"],
+        },
+        "concurrency": 1,
+        "priority": 0,
+        "rate_multiplier": 1,
+        "auto_pause_on_expired": True,
+    }
+
+
+def _make_sub2api_account_json(items: list[AccountRecord]) -> dict:
+    return {
+        "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "proxies": [],
+        "accounts": [_make_sub2api_account_entry(item) for item in items],
     }
 
 
@@ -269,6 +313,15 @@ class AccountExportsService:
             filename=_timestamp_name("sub2api_tokens", "zip"),
             media_type="application/zip",
             content=buffer,
+        )
+
+    def export_chatgpt_sub2api_account(self, selection: AccountExportSelection) -> ExportArtifact:
+        items = self._load_chatgpt_items(selection)
+        content = json.dumps(_make_sub2api_account_json(items), ensure_ascii=False, indent=2)
+        return ExportArtifact(
+            filename=_timestamp_name("sub2api_account_tokens", "json"),
+            media_type="application/json",
+            content=content,
         )
 
     def export_chatgpt_cpa(self, selection: AccountExportSelection) -> ExportArtifact:

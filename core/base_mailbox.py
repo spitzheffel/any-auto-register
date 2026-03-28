@@ -120,6 +120,16 @@ def _create_moemail(extra: dict, proxy: str | None) -> 'BaseMailbox':
     )
 
 
+def _create_yyds_mail(extra: dict, proxy: str | None) -> 'BaseMailbox':
+    return YYDSMailMailbox(
+        api_url=extra.get("yyds_mail_api_url"),
+        api_key=extra.get("yyds_mail_api_key", ""),
+        domain=extra.get("yyds_mail_domain", ""),
+        address_prefix=extra.get("yyds_mail_address_prefix", ""),
+        proxy=proxy,
+    )
+
+
 def _create_cfworker(extra: dict, proxy: str | None) -> 'BaseMailbox':
     return CFWorkerMailbox(
         api_url=extra.get("cfworker_api_url", ""),
@@ -143,6 +153,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "duckmail_api": _create_duckmail,
     "freemail_api": _create_freemail,
     "moemail_api": _create_moemail,
+    "yyds_mail_api": _create_yyds_mail,
     "cfworker_admin_api": _create_cfworker,
     "laoudo_api": _create_laoudo,
     # backward-compat fallback
@@ -150,6 +161,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "duckmail": _create_duckmail,
     "freemail": _create_freemail,
     "moemail": _create_moemail,
+    "yyds_mail": _create_yyds_mail,
     "cfworker": _create_cfworker,
     "laoudo": _create_laoudo,
 }
@@ -464,6 +476,198 @@ class TempMailLolMailbox(BaseMailbox):
                     seen.add(mid)
                     text = str(mail.get("subject", "")) + " " + str(mail.get("body", "")) + " " + str(mail.get("html", ""))
                     link = _extract_verification_link(text, keyword)
+                    if link:
+                        return link
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+
+
+class YYDSMailMailbox(BaseMailbox):
+    """YYDS Mail / 215.im 临时邮箱服务"""
+
+    def __init__(
+        self,
+        api_url: str = "https://maliapi.215.im/v1",
+        api_key: str = "",
+        domain: str = "",
+        address_prefix: str = "",
+        proxy: str = None,
+    ):
+        normalized = _normalize_api_base_url(api_url, default="https://maliapi.215.im/v1", label="YYDS Mail API URL")
+        self.api = normalized if normalized.endswith("/v1") else f"{normalized}/v1"
+        self.api_key = str(api_key or "").strip()
+        self.domain = str(domain or "").strip()
+        self.address_prefix = str(address_prefix or "").strip()
+        self.proxy = {"http": proxy, "https": proxy} if proxy else None
+
+    def _headers(self, token: str = "") -> dict:
+        token = str(token or "").strip()
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+        }
+        if token:
+            headers["authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            return headers
+        if not self.api_key:
+            raise RuntimeError("YYDS Mail 未配置 API Key")
+        headers["x-api-key"] = self.api_key
+        return headers
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str = "",
+        params: dict | None = None,
+        payload: dict | None = None,
+        timeout: int = 15,
+    ) -> dict:
+        import requests
+
+        r = requests.request(
+            method,
+            f"{self.api}{path}",
+            headers=self._headers(token),
+            params=params,
+            json=payload,
+            proxies=self.proxy,
+            timeout=timeout,
+        )
+        if r.status_code >= 400:
+            try:
+                detail = r.json()
+                message = detail.get("error") or detail.get("message") or r.text
+            except Exception:
+                message = r.text
+            raise RuntimeError(f"YYDS Mail 请求失败 ({r.status_code}): {str(message).strip()}")
+        if r.status_code == 204:
+            return {}
+        data = r.json()
+        if isinstance(data, dict) and data.get("success") is False:
+            raise RuntimeError(f"YYDS Mail 请求失败: {data.get('error') or 'unknown error'}")
+        if isinstance(data, dict) and "data" in data:
+            payload = data.get("data")
+            return payload if isinstance(payload, dict) else {"items": payload}
+        return data if isinstance(data, dict) else {"items": data}
+
+    def _list_messages(self, token: str, limit: int = 50) -> list[dict]:
+        data = self._request_json("GET", "/messages", token=token, params={"limit": limit}, timeout=10)
+        messages = data.get("messages", [])
+        return messages if isinstance(messages, list) else []
+
+    def _message_detail(self, token: str, message_id: str) -> dict:
+        return self._request_json("GET", f"/messages/{message_id}", token=token, timeout=10)
+
+    @staticmethod
+    def _message_text(detail: dict) -> str:
+        html_value = detail.get("html")
+        if isinstance(html_value, list):
+            html_text = " ".join(str(item or "") for item in html_value)
+        else:
+            html_text = str(html_value or "")
+        return " ".join(
+            [
+                str(detail.get("subject") or ""),
+                str(detail.get("text") or ""),
+                html_text,
+            ]
+        )
+
+    def get_email(self) -> MailboxAccount:
+        payload: dict[str, str] = {}
+        if self.address_prefix:
+            payload["address"] = self.address_prefix
+        if self.domain:
+            payload["domain"] = self.domain
+        data = self._request_json("POST", "/accounts", payload=payload or None)
+        email = str(data.get("address") or "")
+        token = str(data.get("token") or "")
+        inbox_id = str(data.get("id") or "")
+        if not email or not token:
+            raise RuntimeError("YYDS Mail 创建邮箱失败: 返回结果缺少 address 或 token")
+        return MailboxAccount(
+            email=email,
+            account_id=token,
+            extra={
+                "provider_resource": {
+                    "provider_type": "mailbox",
+                    "provider_name": "yyds_mail",
+                    "resource_type": "mailbox",
+                    "resource_identifier": inbox_id or email,
+                    "handle": email,
+                    "display_name": email,
+                    "metadata": {
+                        "email": email,
+                        "inbox_id": inbox_id,
+                        "api_url": self.api,
+                    },
+                },
+            },
+        )
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        try:
+            return {
+                str(message.get("id") or "")
+                for message in self._list_messages(account.account_id)
+                if str(message.get("id") or "")
+            }
+        except Exception:
+            return set()
+
+    def wait_for_code(
+        self,
+        account: MailboxAccount,
+        keyword: str = "",
+        timeout: int = 120,
+        before_ids: set = None,
+        code_pattern: str = None,
+    ) -> str:
+        import re
+        import time
+
+        seen = set(before_ids or [])
+        start = time.time()
+        pattern = re.compile(code_pattern or r"(?<!#)(?<!\d)(\d{6})(?!\d)")
+        while time.time() - start < timeout:
+            try:
+                for message in self._list_messages(account.account_id, limit=20):
+                    mid = str(message.get("id") or "")
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    detail = self._message_detail(account.account_id, mid)
+                    text = self._message_text(detail)
+                    if keyword and keyword.lower() not in text.lower():
+                        continue
+                    text = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "", text)
+                    match = pattern.search(text)
+                    if match:
+                        return match.group(1) if match.groups() else match.group(0)
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+
+    def wait_for_link(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None) -> str:
+        import time
+
+        seen = set(before_ids or [])
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                for message in self._list_messages(account.account_id, limit=20):
+                    mid = str(message.get("id") or "")
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    detail = self._message_detail(account.account_id, mid)
+                    link = _extract_verification_link(self._message_text(detail), keyword)
                     if link:
                         return link
             except Exception:

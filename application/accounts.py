@@ -65,6 +65,12 @@ class AccountsService:
     def delete_account(self, account_id: int) -> dict:
         return {"ok": self.repository.delete(account_id)}
 
+    def delete_accounts(self, account_ids: list[int]) -> dict:
+        normalized_ids = [int(account_id) for account_id in account_ids if int(account_id) > 0]
+        if not normalized_ids:
+            return {"ok": True, "deleted": 0}
+        return {"ok": True, "deleted": self.repository.delete_many(normalized_ids)}
+
     def import_accounts(self, platform: str, lines: list[str]) -> dict:
         parsed: list[AccountImportLine] = []
         csv_header: list[str] | None = None

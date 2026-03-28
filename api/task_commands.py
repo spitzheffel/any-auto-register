@@ -39,6 +39,17 @@ def cancel_task(task_id: str):
     return task
 
 
+@router.post("/{task_id}/retry")
+def retry_task(task_id: str):
+    try:
+        task = command_service.retry_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
 @router.get("/{task_id}/logs/stream")
 async def stream_logs(task_id: str, since: int = 0):
     if not query_service.get_task(task_id):

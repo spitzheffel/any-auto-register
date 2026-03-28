@@ -62,6 +62,10 @@ class BatchExportRequest(BaseModel):
     search_filter: Optional[str] = None
 
 
+class BatchDeleteRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
 def _stream_artifact(artifact: ExportArtifact) -> StreamingResponse:
     if isinstance(artifact.content, io.BytesIO):
         body = artifact.content
@@ -158,6 +162,23 @@ def export_accounts_sub2api(body: BatchExportRequest):
     return _stream_artifact(artifact)
 
 
+@router.post("/export/sub2api-account")
+def export_accounts_sub2api_account(body: BatchExportRequest):
+    try:
+        artifact = exports_service.export_chatgpt_sub2api_account(
+            AccountExportSelection(
+                platform=body.platform,
+                ids=body.ids,
+                select_all=body.select_all,
+                status_filter=body.status_filter or "",
+                search_filter=body.search_filter or "",
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _stream_artifact(artifact)
+
+
 @router.post("/export/cpa")
 def export_accounts_cpa(body: BatchExportRequest):
     try:
@@ -178,6 +199,11 @@ def export_accounts_cpa(body: BatchExportRequest):
 @router.post("/import")
 def import_accounts(body: ImportRequest):
     return service.import_accounts(body.platform, body.lines)
+
+
+@router.post("/batch-delete")
+def batch_delete_accounts(body: BatchDeleteRequest):
+    return service.delete_accounts(body.ids)
 
 
 @router.get("/{account_id}")

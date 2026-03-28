@@ -14,6 +14,31 @@ from curl_cffi import CurlMime
 logger = logging.getLogger(__name__)
 
 
+def _build_proxies(proxy: str | None) -> dict | None:
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
+def _parse_bool_config(value: str | bool | None, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _resolve_cpa_use_proxy(use_proxy: bool | None) -> bool:
+    if use_proxy is not None:
+        return bool(use_proxy)
+    return _parse_bool_config(_get_config_value("cpa_use_proxy"), default=False)
+
+
 def _decode_jwt_payload(token: str) -> dict:
     try:
         parts = token.split(".")
@@ -78,8 +103,9 @@ def upload_to_cpa(
     api_url: str = None,
     api_key: str = None,
     proxy: str = None,
+    use_proxy: bool | None = None,
 ) -> Tuple[bool, str]:
-    """上传单个账号到 CPA 管理平台（不走代理）。
+    """上传单个账号到 CPA 管理平台。
     api_url / api_key 为空时自动从 ConfigStore 读取。"""
     if not api_url:
         api_url = _get_config_value("cpa_api_url")
@@ -111,7 +137,7 @@ def upload_to_cpa(
             upload_url,
             multipart=mime,
             headers=headers,
-            proxies=None,
+            proxies=_build_proxies(proxy) if _resolve_cpa_use_proxy(use_proxy) else None,
             verify=False,
             timeout=30,
             impersonate="chrome110",
@@ -198,7 +224,7 @@ def upload_to_team_manager(
 
 
 def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tuple[bool, str]:
-    """测试 CPA 连接（不走代理）"""
+    """测试 CPA 连接。"""
     if not api_url:
         return False, "API URL 不能为空"
     if not api_token:
@@ -212,7 +238,7 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
         response = cffi_requests.options(
             test_url,
             headers=headers,
-            proxies=None,
+            proxies=_build_proxies(proxy) if _resolve_cpa_use_proxy(None) else None,
             verify=False,
             timeout=10,
             impersonate="chrome110",

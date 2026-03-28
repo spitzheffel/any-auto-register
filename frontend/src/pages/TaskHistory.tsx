@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { getPlatforms } from '@/lib/app-data'
 import { apiFetch } from '@/lib/utils'
+import { TaskDetailModal } from '@/components/tasks/TaskDetailModal'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { getTaskStatusText, TASK_STATUS_VARIANTS } from '@/lib/tasks'
+import { getTaskStatusText, getTaskTypeText, isActiveTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
 import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3 } from 'lucide-react'
 
 export default function TaskHistory() {
@@ -13,8 +14,9 @@ export default function TaskHistory() {
   const [status, setStatus] = useState('')
   const [platforms, setPlatforms] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  const [selectedTask, setSelectedTask] = useState<any | null>(null)
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true)
     try {
       const params = new URLSearchParams({ page: '1', page_size: '50' })
@@ -25,13 +27,34 @@ export default function TaskHistory() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [platform, status])
 
   useEffect(() => {
     getPlatforms().then(data => setPlatforms(data || [])).catch(() => setPlatforms([]))
   }, [])
 
-  useEffect(() => { load() }, [platform, status])
+  useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    if (!tasks.some(task => isActiveTaskStatus(String(task.status || '')))) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      load().catch(() => {})
+    }, 4000)
+    return () => window.clearInterval(timer)
+  }, [tasks, load])
+
+  const handleTaskChange = useCallback((nextTask: any) => {
+    setSelectedTask(nextTask)
+    setTasks(prev => {
+      const index = prev.findIndex(item => item.id === nextTask.id)
+      if (index === -1) return [nextTask, ...prev]
+      const next = [...prev]
+      next[index] = nextTask
+      return next
+    })
+    load().catch(() => {})
+  }, [load])
 
   const succeeded = tasks.filter(task => task.status === 'succeeded').length
   const failed = tasks.filter(task => task.status === 'failed').length
@@ -45,6 +68,14 @@ export default function TaskHistory() {
 
   return (
     <div className="space-y-4">
+      {selectedTask ? (
+        <TaskDetailModal
+          task={selectedTask}
+          onClose={() => setSelectedTask(null)}
+          onTaskChange={handleTaskChange}
+        />
+      ) : null}
+
       <Card className="overflow-hidden p-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -126,17 +157,19 @@ export default function TaskHistory() {
             <tr className="border-b border-[var(--border)] text-[var(--text-muted)]">
               <th className="px-4 py-2.5 text-left">时间</th>
               <th className="px-4 py-2.5 text-left">任务 ID</th>
+              <th className="px-4 py-2.5 text-left">类型</th>
               <th className="px-4 py-2.5 text-left">平台</th>
               <th className="px-4 py-2.5 text-left">状态</th>
               <th className="px-4 py-2.5 text-left">进度</th>
               <th className="px-4 py-2.5 text-left">结果</th>
               <th className="px-4 py-2.5 text-left">错误</th>
+              <th className="px-4 py-2.5 text-right">操作</th>
             </tr>
           </thead>
           <tbody>
             {tasks.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-8">
+                <td colSpan={9} className="px-4 py-8">
                   <div className="empty-state-panel">当前筛选下没有任务记录。</div>
                 </td>
               </tr>
@@ -147,6 +180,7 @@ export default function TaskHistory() {
                   {task.created_at ? new Date(task.created_at).toLocaleString('zh-CN', { hour12: false }) : '-'}
                 </td>
                 <td className="px-4 py-2.5 font-mono text-xs text-[var(--text-secondary)]">{task.id}</td>
+                <td className="px-4 py-2.5 text-xs text-[var(--text-secondary)]">{getTaskTypeText(task.type)}</td>
                 <td className="px-4 py-2.5">
                   <Badge variant="secondary">{task.platform || '-'}</Badge>
                 </td>
@@ -165,6 +199,11 @@ export default function TaskHistory() {
                 </td>
                 <td className="px-4 py-2.5 text-xs">
                   <span className={task.error ? 'text-red-400' : 'text-[var(--text-muted)]'}>{task.error || '-'}</span>
+                </td>
+                <td className="px-4 py-2.5 text-right">
+                  <Button size="sm" variant="outline" onClick={() => setSelectedTask(task)}>
+                    查看日志
+                  </Button>
                 </td>
               </tr>
             ))}

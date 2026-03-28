@@ -19,9 +19,6 @@ class GrokPlatform(BasePlatform):
         super().__init__(config)
         self.mailbox = mailbox
 
-    def _prepare_registration_password(self, password: str | None) -> str | None:
-        return password or ""
-
     def _map_grok_result(self, result: dict, *, password: str = "") -> RegistrationResult:
         return RegistrationResult(
             email=result["email"],
@@ -34,6 +31,12 @@ class GrokPlatform(BasePlatform):
                 "family_name": result.get("family_name", ""),
             },
         )
+
+    def _browser_preflight(self, ctx) -> None:
+        if ctx.identity.identity_provider == "mailbox" and ctx.platform._resolve_captcha_solver() == "local_solver":
+            from services.solver_manager import start
+
+            start()
 
     def _run_protocol_oauth(self, ctx) -> dict:
         from platforms.grok.browser_oauth import register_with_browser_oauth
@@ -53,6 +56,7 @@ class GrokPlatform(BasePlatform):
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_grok_result(result),
             browser_worker_builder=lambda ctx, artifacts: __import__("platforms.grok.browser_register", fromlist=["GrokBrowserRegister"]).GrokBrowserRegister(
+                captcha=artifacts.captcha_solver if ctx.identity.identity_provider == "mailbox" else None,
                 headless=(ctx.executor_type == "headless"),
                 proxy=ctx.proxy,
                 otp_callback=artifacts.otp_callback,
@@ -65,6 +69,8 @@ class GrokPlatform(BasePlatform):
             oauth_runner=self._run_protocol_oauth,
             capability=RegistrationCapability(oauth_allowed_executor_types=("headed",)),
             otp_spec=OtpSpec(wait_message="等待验证码...", code_pattern=r"[A-Z0-9]{3}-[A-Z0-9]{3}"),
+            use_captcha_for_mailbox=True,
+            preflight=self._browser_preflight,
         )
 
     def build_protocol_oauth_adapter(self):

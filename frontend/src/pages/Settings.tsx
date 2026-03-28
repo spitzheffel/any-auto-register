@@ -163,6 +163,10 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'X', value: 'x' },
     { label: 'Builder ID', value: 'builderid' },
   ],
+  cpa_use_proxy: [
+    { label: '直连（默认）', value: 'false' },
+    { label: '跟随当前任务代理', value: 'true' },
+  ],
 }
 
 const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
@@ -202,10 +206,11 @@ const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
     id: 'chatgpt', label: 'ChatGPT', icon: Shield,
     sections: [{
       section: 'CPA 面板',
-      desc: '注册完成后自动上传到 CPA 管理平台',
+      desc: '注册完成后自动上传到 CPA 管理平台；开启代理后会跟随当前注册任务的代理，没有任务代理时回退直连。',
       items: [
         { key: 'cpa_api_url', label: 'API URL', placeholder: 'https://your-cpa.example.com' },
         { key: 'cpa_api_key', label: 'API Key', secret: true },
+        { key: 'cpa_use_proxy', label: '上传网络' },
       ],
     }, {
       section: 'Team Manager',

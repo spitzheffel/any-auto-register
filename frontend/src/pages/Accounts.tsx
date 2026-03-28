@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { getTaskStatusText, TASK_STATUS_VARIANTS } from '@/lib/tasks'
-import { RefreshCw, Copy, ExternalLink, Download, Upload, Plus, X, Mail, WalletCards, ShieldCheck, Inbox, ScanSearch } from 'lucide-react'
+import { RefreshCw, Copy, ExternalLink, Download, Upload, Plus, X, Mail, WalletCards, ShieldCheck, Inbox, ScanSearch, Trash2 } from 'lucide-react'
 
 const STATUS_VARIANT: Record<string, any> = {
   registered: 'default', trial: 'success', subscribed: 'success',
@@ -75,6 +75,23 @@ function getPrimaryToken(acc: any) {
   if (acc?.primary_token) return acc.primary_token
   const credential = getCredentials(acc).find((item: any) => item?.scope === 'platform' && item?.credential_type === 'token' && item?.value)
   return credential?.value || ''
+}
+
+function getPlatformCredentialValue(acc: any, keys: string[]) {
+  const credentials = getCredentials(acc)
+  for (const key of keys) {
+    const credential = credentials.find((item: any) => item?.scope === 'platform' && item?.key === key && item?.value)
+    if (credential?.value) return String(credential.value)
+  }
+  return ''
+}
+
+function getGrokSso(acc: any) {
+  return getPlatformCredentialValue(acc, ['sso'])
+}
+
+function getGrokSsoRw(acc: any) {
+  return getPlatformCredentialValue(acc, ['sso_rw', 'sso-rw'])
 }
 
 function escapeCsvField(value: unknown) {
@@ -1009,7 +1026,7 @@ function ExportMenu({
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  const doExport = async (format: 'json' | 'csv' | 'cpa' | 'sub2api') => {
+  const doExport = async (format: 'json' | 'csv' | 'cpa' | 'sub2api' | 'sub2api-account') => {
     setLoading(format)
     try {
       const { blob, filename } = await apiDownload(`/accounts/export/${format}`, {
@@ -1035,7 +1052,8 @@ function ExportMenu({
     { key: 'json', label: '导出 JSON' },
     { key: 'csv', label: '导出 CSV' },
     { key: 'cpa', label: '导出 CPA' },
-    { key: 'sub2api', label: '导出 Sub2Api' },
+    { key: 'sub2api', label: '导出 Sub2Api(旧)' },
+    { key: 'sub2api-account', label: '导出 Sub2API Account' },
   ] as const
 
   return (
@@ -1050,7 +1068,7 @@ function ExportMenu({
         {loading ? '导出中...' : hasSelection ? `导出已选(${selectedIds.length})` : '导出'}
       </Button>
       {open && (
-        <div className="absolute right-0 top-10 z-20 min-w-[148px] rounded-lg border border-[var(--border)] bg-[var(--bg-card)] py-1 shadow-lg">
+          <div className="absolute right-0 top-10 z-50 min-w-[148px] rounded-lg border border-[var(--border)] bg-[var(--bg-card)] py-1 shadow-lg">
           <div className="px-3 py-1 text-[11px] text-[var(--text-muted)]">
             {hasSelection ? `导出 ${selectedIds.length} 个已选账号` : '导出当前筛选结果'}
           </div>
@@ -1112,6 +1130,7 @@ export default function Accounts() {
   const [showRegister, setShowRegister] = useState(false)
   const [platformsMap, setPlatformsMap] = useState<Record<string, any>>({})
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [deletingSelected, setDeletingSelected] = useState(false)
   const [actionResult, setActionResult] = useState<{ title: string; payload: any } | null>(null)
 
   useEffect(() => {
@@ -1152,7 +1171,8 @@ export default function Accounts() {
   }, [accounts])
 
   const exportCsv = () => {
-    const header = 'email,password,display_status,lifecycle_status,plan_state,validity_status,cashier_url,created_at'
+    const baseHeaders = ['email', 'password', 'display_status', 'lifecycle_status', 'plan_state', 'validity_status', 'cashier_url', 'created_at']
+    const headers = tab === 'grok' ? [...baseHeaders, 'sso', 'sso_rw'] : baseHeaders
     const rowsSource = selectedIds.size > 0 ? accounts.filter(a => selectedIds.has(a.id)) : accounts
     const rows = rowsSource.map(a => [
       a.email,
@@ -1163,8 +1183,9 @@ export default function Accounts() {
       getValidityStatus(a),
       getCashierUrl(a),
       a.created_at,
+      ...(tab === 'grok' ? [getGrokSso(a), getGrokSsoRw(a)] : []),
     ].map(escapeCsvField).join(','))
-    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
+    const blob = new Blob([[headers.join(','), ...rows].join('\n')], { type: 'text/csv' })
     triggerBrowserDownload(blob, `${tab}_accounts.csv`)
   }
 
@@ -1188,6 +1209,24 @@ export default function Accounts() {
       else pageIds.forEach(id => next.add(id))
       return next
     })
+  }
+
+  const deleteSelected = async () => {
+    if (selectedCount === 0) return
+    if (!window.confirm(`确认删除选中的 ${selectedCount} 个账号吗？此操作不可撤销。`)) return
+    setDeletingSelected(true)
+    try {
+      await apiFetch('/accounts/batch-delete', {
+        method: 'POST',
+        body: JSON.stringify({ ids: [...selectedIds] }),
+      })
+      setSelectedIds(new Set())
+      await load()
+    } catch (error: any) {
+      window.alert(error?.message || '批量删除失败')
+    } finally {
+      setDeletingSelected(false)
+    }
   }
 
   const copy = (text: string) => {
@@ -1218,7 +1257,7 @@ export default function Accounts() {
         <WorkspaceMetric label="可操作" value={linkedCashier} icon={ScanSearch} />
       </div>
 
-      <Card className="bg-[var(--bg-pane)]/60">
+      <Card className="z-30 overflow-visible bg-[var(--bg-pane)]/60">
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -1253,6 +1292,15 @@ export default function Accounts() {
                   导出
                 </Button>
               )}
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={deleteSelected}
+                disabled={selectedCount === 0 || deletingSelected}
+              >
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                {deletingSelected ? '删除中...' : `批量删除${selectedCount > 0 ? `(${selectedCount})` : ''}`}
+              </Button>
               <Button size="sm" variant="outline" onClick={() => setShowAdd(true)}>手动新增</Button>
               <Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>
                 <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />

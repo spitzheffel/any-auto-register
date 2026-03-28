@@ -8,8 +8,8 @@ import { TaskLogPanel } from '@/components/tasks/TaskLogPanel'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Play, CheckCircle, XCircle, Loader2, Orbit, Mail, ScanText, ShieldCheck, Workflow } from 'lucide-react'
-import { getTaskStatusText, isTerminalTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
+import { Play, CheckCircle, XCircle, Loader2, Orbit, Mail, ScanText, ShieldCheck, Workflow, RotateCcw, Square } from 'lucide-react'
+import { canRetryTask, getTaskStatusText, isActiveTaskStatus, isTerminalTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
 
 const FALLBACK_PLATFORMS = [
   { name: 'chatgpt', display_name: 'ChatGPT' },
@@ -62,6 +62,7 @@ export default function Register() {
   const [optionsError, setOptionsError] = useState('')
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
+  const [taskActionLoading, setTaskActionLoading] = useState<'cancel' | 'retry' | null>(null)
   const handledTerminalTaskIdsRef = useRef<Set<string>>(new Set())
   const openedCashierTaskIdsRef = useRef<Set<string>>(new Set())
 
@@ -235,6 +236,33 @@ export default function Register() {
       setPolling(false)
     }
   }, [applyTerminalTask, task?.task_id])
+
+  const cancelTask = async () => {
+    if (!task?.task_id) return
+    if (!window.confirm('确认中断当前任务吗？')) return
+    setTaskActionLoading('cancel')
+    try {
+      const latest = await apiFetch(`/tasks/${task.task_id}/cancel`, { method: 'POST' })
+      setTask(latest)
+      if (isTerminalTaskStatus(latest.status)) {
+        setPolling(false)
+      }
+    } finally {
+      setTaskActionLoading(null)
+    }
+  }
+
+  const retryTask = async () => {
+    if (!task?.task_id) return
+    setTaskActionLoading('retry')
+    try {
+      const latest = await apiFetch(`/tasks/${task.task_id}/retry`, { method: 'POST' })
+      setTask(latest)
+      setPolling(true)
+    } finally {
+      setTaskActionLoading(null)
+    }
+  }
 
   useEffect(() => {
     if (!task?.task_id || isTerminalTaskStatus(task.status)) {
@@ -470,6 +498,26 @@ export default function Register() {
                   <div className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--chip-bg)] p-3 text-xs text-[var(--text-secondary)]">
                     <div>任务 ID</div>
                     <div className="mt-1 break-all font-mono text-[var(--text-primary)]">{task.id}</div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {isActiveTaskStatus(task.status) ? (
+                      <Button size="sm" variant="destructive" onClick={cancelTask} disabled={taskActionLoading !== null}>
+                        <Square className="mr-1.5 h-3.5 w-3.5" />
+                        {taskActionLoading === 'cancel' ? '中断中...' : '中断任务'}
+                      </Button>
+                    ) : null}
+                    {canRetryTask(task) ? (
+                      <Button size="sm" variant="outline" onClick={retryTask} disabled={taskActionLoading !== null}>
+                        <RotateCcw className={`mr-1.5 h-3.5 w-3.5 ${taskActionLoading === 'retry' ? 'animate-spin' : ''}`} />
+                        {taskActionLoading === 'retry' ? '重试中...' : '重试任务'}
+                      </Button>
+                    ) : null}
+                    <Button size="sm" variant="outline" asChild>
+                      <a href="/history">去任务记录</a>
+                    </Button>
+                  </div>
+                  <div className="text-xs text-[var(--text-muted)]">
+                    关闭当前窗口后，也可以在任务记录页继续查看日志、手动中断或重试。
                   </div>
                   {task.errors?.length > 0 && (
                     <div className="space-y-1">

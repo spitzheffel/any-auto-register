@@ -32,6 +32,22 @@ MAILBOX_DRIVER_TEMPLATES = [
     },
     {
         "provider_type": "mailbox",
+        "driver_type": "yyds_mail_api",
+        "label": "YYDS Mail API",
+        "description": "215.im / YYDS Mail 协议族，使用 API Key 创建临时邮箱并通过返回的临时 Token 收件。",
+        "default_auth_mode": "api_key",
+        "auth_modes": [
+            {"value": "api_key", "label": "API Key"},
+        ],
+        "fields": [
+            {"key": "yyds_mail_api_url", "label": "API URL", "placeholder": "https://maliapi.215.im/v1", "category": "connection"},
+            {"key": "yyds_mail_api_key", "label": "API Key", "secret": True, "category": "auth"},
+            {"key": "yyds_mail_domain", "label": "邮箱域名（可选）", "placeholder": "public.example.com", "category": "connection"},
+            {"key": "yyds_mail_address_prefix", "label": "邮箱前缀（可选）", "placeholder": "my-prefix", "category": "identity"},
+        ],
+    },
+    {
+        "provider_type": "mailbox",
         "driver_type": "tempmail_lol_api",
         "label": "TempMail.lol API",
         "description": "tempmail.lol 协议族，自动创建匿名邮箱。",
@@ -158,6 +174,13 @@ BUILTIN_PROVIDER_DEFINITIONS = [
         "label": "MoeMail (sall.cc)",
         "description": "优先复用你手动注册好的 MoeMail 账号；未提供凭据时退回自动注册。",
         "driver_type": "moemail_api",
+    },
+    {
+        "provider_type": "mailbox",
+        "provider_key": "yyds_mail",
+        "label": "YYDS Mail (215.im)",
+        "description": "通过 215.im 的 API Key 创建临时邮箱，适合直接接入其公开 REST API。",
+        "driver_type": "yyds_mail_api",
     },
     {
         "provider_type": "mailbox",

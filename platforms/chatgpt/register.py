@@ -144,6 +144,8 @@ class RegistrationEngine:
         self.logs: list = []
         self._otp_sent_at: Optional[float] = None  # OTP 发送时间戳
         self._is_existing_account: bool = False  # 是否为已注册账号（用于自动登录）
+        self._next_continue_url: str = ""
+        self._next_page_type: str = ""
 
     def _log(self, message: str, level: str = "info"):
         """记录日志"""
@@ -500,6 +502,17 @@ class RegistrationEngine:
                 self._log(f"账户创建失败: {response.text[:200]}", "warning")
                 return False
 
+            self._next_continue_url = ""
+            self._next_page_type = ""
+            try:
+                response_data = response.json() or {}
+                self._next_continue_url = str(response_data.get("continue_url") or "").strip()
+                self._next_page_type = str((response_data.get("page") or {}).get("type") or "").strip()
+                if self._next_page_type:
+                    self._log(f"账户创建下一步: {self._next_page_type}")
+            except Exception:
+                pass
+
             return True
 
         except Exception as e:
@@ -524,14 +537,26 @@ class RegistrationEngine:
                     self._log("授权 Cookie 格式错误", "error")
                     return None
 
-                # 解码第一个 segment
-                payload = segments[0]
-                pad = "=" * ((4 - (len(payload) % 4)) % 4)
-                decoded = base64.urlsafe_b64decode((payload + pad).encode("ascii"))
-                auth_json = json_module.loads(decoded.decode("utf-8"))
+                auth_payloads: list[dict[str, Any]] = []
+                for segment in segments:
+                    pad = "=" * ((4 - (len(segment) % 4)) % 4)
+                    try:
+                        decoded = base64.urlsafe_b64decode((segment + pad).encode("ascii"))
+                        candidate = json_module.loads(decoded.decode("utf-8"))
+                    except Exception:
+                        continue
+                    if isinstance(candidate, dict):
+                        auth_payloads.append(candidate)
 
-                workspaces = auth_json.get("workspaces") or []
+                workspaces = []
+                for auth_json in auth_payloads:
+                    workspaces = auth_json.get("workspaces") or []
+                    if workspaces:
+                        break
+
                 if not workspaces:
+                    if self._next_page_type == "add_phone":
+                        self._log("当前注册流程进入 add_phone 页面，尚未进入 workspace 阶段", "warning")
                     self._log("授权 Cookie 里没有 workspace 信息", "error")
                     return None
 
@@ -759,6 +784,10 @@ class RegistrationEngine:
                 self._log("12. 创建用户账户...")
                 if not self._create_user_account():
                     result.error_message = "创建用户账户失败"
+                    return result
+                if self._next_page_type == "add_phone":
+                    result.error_message = "当前新账号注册后进入 add_phone 页面，协议模式暂未处理手机号步骤"
+                    self._log(result.error_message, "error")
                     return result
 
             # 13. 获取 Workspace ID

@@ -7,7 +7,7 @@
 ## 功能特性
 
 - **多平台支持**：Trae.ai、Tavily、Cursor、Kiro、ChatGPT、OpenBlockLabs，支持自定义插件扩展
-- **多邮箱服务**：MoeMail（自建）、Laoudo、DuckMail、Cloudflare Worker 自建邮箱
+- **多邮箱服务**：MoeMail（自建）、YYDS Mail（215.im）、Laoudo、DuckMail、Cloudflare Worker 自建邮箱
 - **多执行模式**：API 协议（无浏览器）、无头浏览器（待实现）、有头浏览器（待实现）（各平台按需支持）
 - **验证码服务**：YesCaptcha、2Captcha、本地 Solver（Camoufox）
 - **代理池管理**：自动轮询、成功率统计、自动禁用失效代理
@@ -154,6 +154,29 @@ npm run dev
 | Admin Token | 管理员密码，在 Worker 环境变量 `ADMIN_PASSWORDS` 中配置 |
 | 域名 | 收件邮箱的域名，如 `your-domain.com`（需配置 MX 记录指向 Cloudflare）|
 | Fingerprint | 可选，Worker 开启 fingerprint 验证时填写 |
+
+### ChatGPT CPA 上传
+
+在“全局配置 -> ChatGPT -> CPA 面板”中可以配置：
+
+| 参数 | 说明 |
+|------|------|
+| API URL | CPA 管理面板地址，如 `https://cpaadmin.example.com` |
+| API Key | CPA 面板的 Bearer Token |
+| 上传网络 | 选择直连，或跟随当前注册任务代理进行上传 |
+
+### YYDS Mail（215.im）
+
+215.im 提供公开 REST API，可通过 API Key 创建临时邮箱并读取邮件内容。
+
+在“全局配置 -> 邮箱服务”里选择 **YYDS Mail (215.im)**，填写以下字段：
+
+| 参数 | 说明 |
+|------|------|
+| API URL | 默认 `https://maliapi.215.im/v1` |
+| API Key | 在 215.im 的 API Key 管理页创建，放到请求头 `X-API-Key` |
+| 邮箱域名 | 可选，自定义要创建的域名；不填则由服务端自动选择 |
+| 邮箱前缀 | 可选，自定义邮箱前缀；不填则随机生成 |
 
 ### DuckMail
 

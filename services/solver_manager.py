@@ -12,6 +12,13 @@ _proc: subprocess.Popen = None
 _lock = threading.Lock()
 
 
+def _solver_env() -> dict:
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
 def is_running() -> bool:
     try:
         r = requests.get(f"{SOLVER_URL}/", timeout=2)
@@ -33,7 +40,9 @@ def start():
             [sys.executable, solver_script,
              "--browser_type", "camoufox",
              "--thread", "1",   # 只需要 1 个浏览器，节省资源
+             "--proxy",
              "--port", str(SOLVER_PORT)],
+            env=_solver_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
@@ -69,6 +71,43 @@ def _json_default(value: Any) -> Any:
 
 def _dump_json(data: Any) -> str:
     return json.dumps(data or {}, ensure_ascii=False, default=_json_default)
+
+
+def _sanitize_console_text(message: Any) -> str:
+    text = str(message or "")
+    # Windows GBK 控制台容易在零宽字符等格式字符处报编码异常，控制台输出时移除它们。
+    return "".join(
+        ch for ch in text
+        if unicodedata.category(ch) != "Cf" or ch in "\n\r\t"
+    )
+
+
+def _console_print(message: Any) -> None:
+    text = _sanitize_console_text(message)
+    try:
+        print(text)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+
+    stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    fallback = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    try:
+        if hasattr(stream, "buffer"):
+            stream.buffer.write((fallback + "\n").encode(encoding, errors="replace"))
+            stream.buffer.flush()
+        else:
+            stream.write(fallback + "\n")
+            stream.flush()
+    except Exception:
+        try:
+            sys.__stdout__.write(fallback + "\n")
+            sys.__stdout__.flush()
+        except Exception:
+            pass
 
 
 def _task_lock(task_id: str) -> threading.Lock:
@@ -290,20 +329,22 @@ def append_task_event(task_id: str, message: str, *, event_type: str = "log", le
 
 
 def mark_incomplete_tasks_interrupted() -> None:
+    task_ids: list[str] = []
     with Session(engine) as session:
         tasks = session.exec(
             select(TaskModel).where(TaskModel.status.in_(list(ACTIVE_TASK_STATUSES)))
         ).all()
         for task in tasks:
+            task_ids.append(task.id)
             task.status = TASK_STATUS_INTERRUPTED
             task.error = task.error or "任务在服务重启后被中断"
             task.finished_at = _utcnow()
             task.updated_at = _utcnow()
             session.add(task)
         session.commit()
-    for task in tasks:
+    for task_id in task_ids:
         append_task_event(
-            task.id,
+            task_id,
             "任务在服务重启后被标记为中断",
             event_type="state",
             level="warning",
@@ -318,6 +359,67 @@ def request_cancel(task_id: str) -> Optional[dict[str, Any]]:
     if not task:
         return None
     append_task_event(task_id, "已请求取消任务", event_type="state", level="warning")
+    return serialize_task(task)
+
+
+def retry_task(task_id: str) -> dict[str, Any] | None:
+    with Session(engine) as session:
+        task = session.get(TaskModel, task_id)
+        if not task:
+            return None
+        if task.status not in TERMINAL_TASK_STATUSES:
+            raise ValueError("任务尚未结束，不能重试")
+        payload = task.get_payload()
+        cloned_type = str(task.type or "")
+        cloned_platform = str(task.platform or payload.get("platform", "") or "")
+        progress_total = int(task.progress_total or 0)
+
+    retried = create_task(
+        task_type=cloned_type,
+        platform=cloned_platform,
+        payload=payload,
+        progress_total=progress_total,
+    )
+    append_task_event(
+        retried["id"],
+        f"由任务 {task_id} 发起重试",
+        event_type="state",
+        detail={"source_task_id": task_id},
+    )
+    return retried
+
+
+def force_finish_task(
+    task_id: str,
+    *,
+    status: str,
+    error: str = "",
+    event_message: str = "",
+    level: str = "warning",
+) -> dict[str, Any] | None:
+    applied = {"done": False}
+
+    def _update(task: TaskModel) -> None:
+        if task.status in TERMINAL_TASK_STATUSES:
+            return
+        task.status = status
+        task.finished_at = _utcnow()
+        task.updated_at = _utcnow()
+        if error:
+            task.error = error
+        applied["done"] = True
+
+    task = _mutate_task(task_id, _update)
+    if not task:
+        return None
+    if applied["done"] and event_message:
+        append_task_event(
+            task_id,
+            event_message,
+            event_type="state",
+            level=level,
+            detail={"status": status, "error": error},
+        )
     return serialize_task(task)
 
 
@@ -375,7 +477,7 @@ class TaskLogger:
             level=level,
             detail=detail,
         )
-        print(f"[task:{self.task_id}] {message}")
+        _console_print(f"[task:{self.task_id}] {message}")
 
     def mark_running(self) -> None:
         def _update(task: TaskModel) -> None:
@@ -452,7 +554,7 @@ class TaskLogger:
         )
 
 
-def _auto_upload_cpa(task_logger: TaskLogger, account) -> None:
+def _auto_upload_cpa(task_logger: TaskLogger, account, proxy: str | None = None) -> None:
     if getattr(account, "platform", "") != "chatgpt":
         return
     try:
@@ -473,7 +575,7 @@ def _auto_upload_cpa(task_logger: TaskLogger, account) -> None:
             target.id_token = extra.get("id_token", "")
 
             token_data = generate_token_json(target)
-            ok, msg = upload_to_cpa(token_data)
+            ok, msg = upload_to_cpa(token_data, proxy=proxy)
             task_logger.log(f"  [CPA] {'✓ ' + msg if ok else '✗ ' + msg}")
     except Exception as exc:
         task_logger.log(f"  [CPA] 自动上传异常: {exc}", level="warning")
@@ -605,7 +707,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             logger.record_success()
             logger.log(f"✓ 注册成功: {account.email}")
             _save_task_log(platform_name, account.email, "success")
-            _auto_upload_cpa(logger, account)
+            _auto_upload_cpa(logger, account, proxy=resolved_proxy)
             cashier_url = (account.extra or {}).get("cashier_url", "")
             if cashier_url:
                 logger.log(f"  [升级链接] {cashier_url}")

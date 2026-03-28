@@ -223,6 +223,20 @@ class AccountsRepository:
             session.commit()
             return True
 
+    def delete_many(self, account_ids: list[int]) -> int:
+        unique_ids = list(dict.fromkeys(int(account_id) for account_id in account_ids if int(account_id) > 0))
+        if not unique_ids:
+            return 0
+        with Session(engine) as session:
+            models = session.exec(
+                select(AccountModel).where(AccountModel.id.in_(unique_ids))
+            ).all()
+            for model in models:
+                purge_account_graph(session, int(model.id or 0))
+                session.delete(model)
+            session.commit()
+            return len(models)
+
     def import_lines(self, platform: str, lines: list[AccountImportLine]) -> int:
         created = 0
         with Session(engine) as session:

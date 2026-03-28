@@ -173,8 +173,6 @@ class ProviderSettingsRepository:
             existing_items = session.exec(
                 select(ProviderSettingModel).where(ProviderSettingModel.provider_type == provider_type)
             ).all()
-            if existing_items:
-                return
             existing = {item.provider_key: item for item in existing_items}
             changed = False
             for definition in definitions:

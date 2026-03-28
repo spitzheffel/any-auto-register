@@ -59,7 +59,7 @@ def _click_first(page, selectors: list[str], *, timeout: int = 10) -> str | None
 
 def _dump_debug(page, prefix: str) -> None:
     page.screenshot(path=f"/tmp/{prefix}.png")
-    with open(f"/tmp/{prefix}.html", "w") as f:
+    with open(f"/tmp/{prefix}.html", "w", encoding="utf-8", errors="replace") as f:
         f.write(page.content())
 
 
@@ -217,6 +217,10 @@ class ChatGPTBrowserRegister:
             # Check for about-you page
             self.log("等待可能的 Name/Birthday 填写步骤...")
             for _ in range(15):
+                if "add-phone" in page.url:
+                    self.log("检测到 add-phone 页面，当前浏览器模式暂未处理手机号步骤")
+                    _dump_debug(page, "chatgpt_add_phone")
+                    raise RuntimeError(f"当前新账号注册后进入 add-phone 页面: {page.url}")
                 if "chatgpt.com" in page.url:
                     break
                 if page.query_selector('input[name="name"]'):
@@ -244,6 +248,11 @@ class ChatGPTBrowserRegister:
                     time.sleep(5)
                     break
                 time.sleep(1)
+
+            if "add-phone" in page.url:
+                self.log("检测到 add-phone 页面，当前浏览器模式暂未处理手机号步骤")
+                _dump_debug(page, "chatgpt_add_phone")
+                raise RuntimeError(f"当前新账号注册后进入 add-phone 页面: {page.url}")
 
             # Wait for chatgpt.com
             try:

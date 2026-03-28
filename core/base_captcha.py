@@ -4,7 +4,14 @@ from abc import ABC, abstractmethod
 
 class BaseCaptcha(ABC):
     @abstractmethod
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve_turnstile(
+        self,
+        page_url: str,
+        site_key: str,
+        proxy: str | None = None,
+        action: str | None = None,
+        cdata: str | None = None,
+    ) -> str:
         """返回 Turnstile token"""
         ...
 
@@ -19,7 +26,14 @@ class YesCaptcha(BaseCaptcha):
         self.client_key = client_key
         self.api = "https://api.yescaptcha.com"
 
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve_turnstile(
+        self,
+        page_url: str,
+        site_key: str,
+        proxy: str | None = None,
+        action: str | None = None,
+        cdata: str | None = None,
+    ) -> str:
         import requests, time, urllib3
         urllib3.disable_warnings()
         r = requests.post(f"{self.api}/createTask", json={
@@ -50,7 +64,14 @@ class TwoCaptcha(BaseCaptcha):
         self.api_key = api_key
         self.api = "https://2captcha.com"
 
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve_turnstile(
+        self,
+        page_url: str,
+        site_key: str,
+        proxy: str | None = None,
+        action: str | None = None,
+        cdata: str | None = None,
+    ) -> str:
         import time
         import requests
 
@@ -99,7 +120,14 @@ class TwoCaptcha(BaseCaptcha):
 
 class ManualCaptcha(BaseCaptcha):
     """人工打码，阻塞等待用户输入"""
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve_turnstile(
+        self,
+        page_url: str,
+        site_key: str,
+        proxy: str | None = None,
+        action: str | None = None,
+        cdata: str | None = None,
+    ) -> str:
         return input(f"请手动获取 Turnstile token ({page_url}): ").strip()
 
     def solve_image(self, image_b64: str) -> str:
@@ -112,12 +140,26 @@ class LocalSolverCaptcha(BaseCaptcha):
     def __init__(self, solver_url: str = "http://localhost:8889"):
         self.solver_url = solver_url.rstrip("/")
 
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve_turnstile(
+        self,
+        page_url: str,
+        site_key: str,
+        proxy: str | None = None,
+        action: str | None = None,
+        cdata: str | None = None,
+    ) -> str:
         import requests, time
+        params = {"url": page_url, "sitekey": site_key}
+        if proxy:
+            params["proxy"] = proxy
+        if action:
+            params["action"] = action
+        if cdata:
+            params["cdata"] = cdata
         # 提交任务
         r = requests.get(
             f"{self.solver_url}/turnstile",
-            params={"url": page_url, "sitekey": site_key},
+            params=params,
             timeout=15,
         )
         r.raise_for_status()
@@ -154,6 +196,9 @@ class LocalSolverCaptcha(BaseCaptcha):
         solver_path = os.path.join(
             os.path.dirname(__file__), "..", "services", "turnstile_solver", "start.py"
         )
+        env = os.environ.copy()
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
         cmd = [
             sys.executable, solver_path,
             "--port", str(port),
@@ -161,7 +206,7 @@ class LocalSolverCaptcha(BaseCaptcha):
         ]
         if not headless:
             cmd.append("--no-headless")
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # 等待服务启动
         import time, requests
         for _ in range(20):

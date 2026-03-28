@@ -48,6 +48,7 @@ class GrokRegister:
         self.captcha_solver = captcha_solver
         self.key = yescaptcha_key
         self.log = log_fn
+        self.proxy = proxy
         self.s = cffi_requests.Session(impersonate="chrome131")
         if proxy:
             self.s.proxies = {"http": proxy, "https": proxy}
@@ -68,7 +69,11 @@ class GrokRegister:
         if not solver:
             from core.base_captcha import YesCaptcha
             solver = YesCaptcha(self.key)
-        token = solver.solve_turnstile('https://accounts.x.ai/sign-up', TURNSTILE_SITEKEY)
+        token = solver.solve_turnstile(
+            'https://accounts.x.ai/sign-up',
+            TURNSTILE_SITEKEY,
+            proxy=self.proxy,
+        )
         self.log(f"  Turnstile: {token[:40]}...")
         return token
 

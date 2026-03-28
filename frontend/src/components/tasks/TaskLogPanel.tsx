@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { API_BASE, apiFetch } from '@/lib/utils'
 import { getTaskStatusText, isTerminalTaskStatus } from '@/lib/tasks'
+import { Button } from '@/components/ui/button'
 
 export function TaskLogPanel({
   taskId,
@@ -108,9 +109,15 @@ export function TaskLogPanel({
         <div>
           <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">日志</div>
           <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">任务执行日志</div>
+          <div className="mt-1 font-mono text-[11px] text-[var(--text-muted)] break-all">{taskId}</div>
         </div>
-        <div className="rounded-full border border-[var(--border-soft)] bg-[var(--chip-bg)] px-3 py-1 text-xs text-[var(--text-secondary)]">
-          {doneStatus ? getTaskStatusText(doneStatus) : '进行中'}
+        <div className="flex items-center gap-2">
+          <div className="rounded-full border border-[var(--border-soft)] bg-[var(--chip-bg)] px-3 py-1 text-xs text-[var(--text-secondary)]">
+            {doneStatus ? getTaskStatusText(doneStatus) : '进行中'}
+          </div>
+          <Button variant="outline" size="sm" asChild>
+            <a href="/history">任务记录</a>
+          </Button>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto rounded-[22px] border border-[var(--border)] bg-[linear-gradient(180deg,rgba(3,8,8,0.45),rgba(3,8,8,0.24))] p-4 font-mono text-xs space-y-1 min-h-[220px] max-h-[420px] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
