@@ -15,6 +15,7 @@ DEFAULT_LAOUDO_API_URL = "https://laoudo.com/api/email"
 DEFAULT_AITRE_API_URL = "https://mail.aitre.cc/api/tempmail"
 DEFAULT_TEMPMAIL_LOL_API_URL = "https://api.tempmail.lol/v2"
 DEFAULT_TEMPMAIL_WEB_BASE_URL = "https://web2.temp-mail.org"
+DEFAULT_YYDSMAIL_API_URL = "https://maliapi.215.im/v1"
 
 
 @dataclass
@@ -250,6 +251,15 @@ def _create_laoudo(extra: dict, proxy: str | None) -> 'BaseMailbox':
     )
 
 
+def _create_yydsmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
+    return YYDSMailMailbox(
+        api_key=extra.get("yydsmail_api_key", ""),
+        domain=extra.get("yydsmail_domain", ""),
+        base_url=extra.get("yydsmail_base_url", ""),
+        proxy=proxy,
+    )
+
+
 def _create_generic_http(extra: dict, proxy: str | None, *, pipeline_config: dict | None = None) -> 'BaseMailbox':
     from core.generic_http_mailbox import GenericHttpMailbox
     return GenericHttpMailbox(
@@ -272,6 +282,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "testmail_api": _create_testmail,
     "local_ms_pool": _create_local_ms_pool,
     "laoudo_api": _create_laoudo,
+    "yydsmail_api": _create_yydsmail,
     # backward-compat fallback
     "generic_http": _create_generic_http,
     "tempmail_lol": _create_tempmail,
@@ -283,6 +294,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "testmail": _create_testmail,
     "local_ms": _create_local_ms_pool,
     "laoudo": _create_laoudo,
+    "yydsmail": _create_yydsmail,
 }
 
 
@@ -643,6 +655,196 @@ class TempMailLolMailbox(BaseMailbox):
                     seen.add(mid)
                     text = str(mail.get("subject", "")) + " " + str(mail.get("body", "")) + " " + str(mail.get("html", ""))
                     link = _extract_verification_link(text, keyword)
+                    if link:
+                        return link
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+
+
+class YYDSMailMailbox(BaseMailbox):
+    """YYDS Mail 临时邮箱（maliapi.215.im），通过 API Key 自动创建邮箱并收取验证码。
+
+    统一响应信封为 {"success": bool, "data": {...}}；认证使用请求头 X-API-Key: AC-...。
+    """
+
+    def __init__(self, api_key: str = "", domain: str = "", base_url: str = "", proxy: str = None):
+        self.api_key = str(api_key or "").strip()
+        # domain 可选：留空时自动从 /v1/domains 获取第一个可用域名
+        self.domain = str(domain or "").strip()
+        self.base_url = _normalize_api_base_url(
+            base_url,
+            default=DEFAULT_YYDSMAIL_API_URL,
+            label="YYDS Mail API 地址",
+        )
+        self.proxy = {"http": proxy, "https": proxy} if proxy else None
+        self._email = None
+
+    # ── HTTP 封装 ────────────────────────────────────────────────
+    def _request(self, method: str, path: str, **kwargs) -> dict:
+        import requests
+
+        headers = {"X-API-Key": self.api_key, "Accept": "application/json"}
+        headers.update(kwargs.pop("headers", {}) or {})
+        resp = requests.request(
+            method,
+            f"{self.base_url}{path}",
+            headers=headers,
+            proxies=self.proxy,
+            timeout=kwargs.pop("timeout", 15),
+            **kwargs,
+        )
+        # 204 / 空响应：无内容（如 /messages/next 无未读邮件）
+        if resp.status_code == 204 or not resp.content:
+            return {}
+        body = resp.json()
+        if isinstance(body, dict) and body.get("success") is False:
+            raise RuntimeError(body.get("error") or body.get("errorCode") or "YYDS Mail API 调用失败")
+        resp.raise_for_status()
+        if isinstance(body, dict):
+            return body.get("data", body)
+        return {}
+
+    @staticmethod
+    def _random_local_part(length: int = 12) -> str:
+        import random
+        import string
+        return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+    def _pick_domain(self) -> str:
+        """未配置固定域名时，从 /v1/domains 取第一个可用域名。"""
+        try:
+            data = self._request("GET", "/domains")
+        except Exception:
+            return ""
+        items = data.get("domains") if isinstance(data, dict) else data
+        for item in items or []:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                value = str(item.get("domain") or item.get("name") or "").strip()
+                if value:
+                    return value
+        return ""
+
+    def _list_messages(self, address: str) -> list:
+        data = self._request("GET", "/messages", params={"address": address})
+        return list(data.get("messages", []) or [])
+
+    def _get_message(self, address: str, message_id: str) -> dict:
+        return self._request("GET", f"/messages/{message_id}", params={"address": address}) or {}
+
+    @staticmethod
+    def _html_text(html) -> str:
+        if isinstance(html, (list, tuple)):
+            return " ".join(str(item or "") for item in html)
+        return str(html or "")
+
+    @staticmethod
+    def _from_text(sender) -> str:
+        if isinstance(sender, dict):
+            return f"{sender.get('name', '')} {sender.get('address', '')}"
+        return str(sender or "")
+
+    def _message_text(self, detail: dict) -> str:
+        return " ".join([
+            str(detail.get("subject", "")),
+            str(detail.get("text", "")),
+            self._html_text(detail.get("html")),
+            self._from_text(detail.get("from")),
+        ])
+
+    # ── BaseMailbox 契约实现 ─────────────────────────────────────
+    def get_email(self) -> MailboxAccount:
+        if not self.api_key:
+            raise RuntimeError("YYDS Mail API Key 未配置")
+        local_part = self._random_local_part()
+        domain = self.domain or self._pick_domain()
+        payload = {"localPart": local_part}
+        if domain:
+            payload["domain"] = domain
+        data = self._request("POST", "/accounts", json=payload)
+        address = str(data.get("address") or "")
+        inbox_id = str(data.get("id") or "")
+        if not address:
+            raise RuntimeError("YYDS Mail 创建邮箱失败：未返回 address")
+        self._email = address
+        return MailboxAccount(
+            email=address,
+            account_id=inbox_id,
+            extra={
+                "provider_resource": {
+                    "provider_type": "mailbox",
+                    "provider_name": "yydsmail",
+                    "resource_type": "mailbox",
+                    "resource_identifier": inbox_id or address,
+                    "handle": address,
+                    "display_name": address,
+                    "metadata": {
+                        "email": address,
+                        "inbox_id": inbox_id,
+                    },
+                },
+            },
+        )
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        try:
+            return {str(msg.get("id", "")) for msg in self._list_messages(account.email) if msg.get("id")}
+        except Exception:
+            return set()
+
+    def wait_for_code(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
+        import re
+        import time
+
+        seen = set(before_ids or [])
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                for msg in self._list_messages(account.email):
+                    mid = str(msg.get("id", ""))
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    detail = self._get_message(account.email, mid)
+                    text = self._message_text(detail)
+                    if keyword and keyword.lower() not in text.lower():
+                        continue
+                    if code_pattern:
+                        match = re.search(code_pattern, text)
+                        if match:
+                            return match.group(1) if match.groups() else match.group(0)
+                        continue
+                    # 优先使用服务端提取的验证码，其次回退到 6 位数字匹配
+                    server_code = str(detail.get("verificationCode") or "").strip()
+                    if server_code:
+                        return server_code
+                    match = re.search(r'(?<!#)(?<!\d)(\d{6})(?!\d)', text)
+                    if match:
+                        return match.group(1) if match.groups() else match.group(0)
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+
+    def wait_for_link(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None) -> str:
+        import time
+
+        seen = set(before_ids or [])
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                for msg in self._list_messages(account.email):
+                    mid = str(msg.get("id", ""))
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    detail = self._get_message(account.email, mid)
+                    link = _extract_verification_link(self._message_text(detail), keyword)
                     if link:
                         return link
             except Exception:
