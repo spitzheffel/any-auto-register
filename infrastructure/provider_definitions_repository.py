@@ -264,7 +264,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "category": "thirdparty",
         "auth_modes": [{"value": "apikey", "label": "API Key"}],
         "fields": [
-            {"key": "yescaptcha_key", "label": "Client Key", "secret": True},
+            {"key": "yescaptcha_key", "label": "Client Key", "secret": True, "category": "auth"},
         ],
     },
     {
@@ -278,7 +278,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "category": "thirdparty",
         "auth_modes": [{"value": "apikey", "label": "API Key"}],
         "fields": [
-            {"key": "twocaptcha_key", "label": "API Key", "secret": True},
+            {"key": "twocaptcha_key", "label": "API Key", "secret": True, "category": "auth"},
         ],
     },
     {
