@@ -35,6 +35,7 @@ electron/node_modules/
 electron/dist/
 electron/backend/
 
+
 # PyInstaller
 backend.spec
 --add-data=*
@@ -67,6 +68,8 @@ AGENTS.md
 .claude/
 .trellis/
 .windsurf/
+.qoder/
+.cursor/
 docs/REFACTOR-PLAN.md
 
 # 敏感文件
