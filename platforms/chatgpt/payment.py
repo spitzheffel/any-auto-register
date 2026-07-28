@@ -2,6 +2,8 @@
 支付核心逻辑 — 生成 Plus/Team 支付链接、无痕打开浏览器、检测订阅状态
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import subprocess
