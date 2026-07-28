@@ -147,6 +147,22 @@ _BUILTIN_DEFINITIONS: list[dict] = [
     },
     {
         "provider_type": "mailbox",
+        "provider_key": "yydsmail_api",
+        "label": "YYDS Mail",
+        "description": "YYDS Mail 临时邮箱（maliapi.215.im），通过 API Key 自动创建邮箱并收取验证码",
+        "driver_type": "yydsmail_api",
+        "default_auth_mode": "apikey",
+        "enabled": True,
+        "category": "thirdparty",
+        "auth_modes": [{"value": "apikey", "label": "API Key"}],
+        "fields": [
+            {"key": "yydsmail_api_key", "label": "API Key", "placeholder": "AC-...", "secret": True, "category": "auth"},
+            {"key": "yydsmail_domain", "label": "邮箱域名（可选，留空自动获取）", "placeholder": "example.com", "category": "identity"},
+            {"key": "yydsmail_base_url", "label": "API 地址（可选）", "placeholder": "https://maliapi.215.im/v1", "category": "connection"},
+        ],
+    },
+    {
+        "provider_type": "mailbox",
         "provider_key": "aitre_api",
         "label": "Aitre 临时邮箱",
         "description": "mail.aitre.cc 免费临时邮箱，需指定一个固定邮箱地址",
