@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getPlatforms } from '@/lib/app-data'
 import { apiFetch } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { getTaskStatusText, TASK_STATUS_VARIANTS } from '@/lib/tasks'
-import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown } from 'lucide-react'
+import { TaskDetailModal } from '@/components/tasks/TaskDetailModal'
+import { getTaskStatusText, isCancellableTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
+import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown, Eye } from 'lucide-react'
 
 function shortId(id: string) {
   if (!id) return '-'
@@ -37,17 +38,24 @@ export default function TaskHistory() {
   const [status, setStatus] = useState('')
   const [platforms, setPlatforms] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  const [detailTask, setDetailTask] = useState<any | null>(null)
+  const filtersRef = useRef({ platform, status })
 
-  const load = async () => {
-    setLoading(true)
+  useEffect(() => {
+    filtersRef.current = { platform, status }
+  }, [platform, status])
+
+  const load = async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true)
     try {
       const params = new URLSearchParams({ page: '1', page_size: '50' })
-      if (platform) params.set('platform', platform)
-      if (status) params.set('status', status)
+      const current = filtersRef.current
+      if (current.platform) params.set('platform', current.platform)
+      if (current.status) params.set('status', current.status)
       const data = await apiFetch(`/tasks?${params}`)
       setTasks(data.items || [])
     } finally {
-      setLoading(false)
+      if (!options?.silent) setLoading(false)
     }
   }
 
@@ -63,9 +71,17 @@ export default function TaskHistory() {
 
   const succeeded = tasks.filter((t) => t.status === 'succeeded').length
   const failed = tasks.filter((t) => t.status === 'failed').length
-  const running = tasks.filter((t) =>
-    ['running', 'claimed', 'pending', 'cancel_requested'].includes(t.status)
-  ).length
+  const activeTasks = tasks.filter((t) => isCancellableTaskStatus(t.status))
+  const running = activeTasks.length
+
+  // 有任务在跑时静默刷新，关掉弹窗后列表状态也能跟上
+  useEffect(() => {
+    if (running === 0) return
+    const timer = window.setInterval(() => {
+      load({ silent: true }).catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [running])
 
   const metricCards = [
     { label: '任务数', value: tasks.length, icon: Activity, tone: 'text-[var(--accent)]' },
@@ -79,7 +95,7 @@ export default function TaskHistory() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-[var(--text-primary)]">任务记录</h1>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>
           <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
           刷新
         </Button>
@@ -158,12 +174,13 @@ export default function TaskHistory() {
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">进度</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">成功/失败</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">错误</th>
+                <th className="px-4 py-2.5 text-right text-xs font-medium text-[var(--text-muted)]">操作</th>
               </tr>
             </thead>
             <tbody>
               {tasks.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-[var(--text-muted)]">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-[var(--text-muted)]">
                     暂无任务记录
                   </td>
                 </tr>
@@ -176,7 +193,8 @@ export default function TaskHistory() {
                 return (
                   <tr
                     key={task.id}
-                    className="border-b border-[var(--border)]/50 transition-colors hover:bg-[var(--bg-hover)]"
+                    onClick={() => setDetailTask(task)}
+                    className="cursor-pointer border-b border-[var(--border)]/50 transition-colors hover:bg-[var(--bg-hover)]"
                   >
                     <td className="whitespace-nowrap px-4 py-3 text-xs text-[var(--text-muted)]">
                       {task.created_at
@@ -249,6 +267,19 @@ export default function TaskHistory() {
                         <span className="text-xs text-[var(--text-muted)]">-</span>
                       )}
                     </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setDetailTask(task)
+                        }}
+                      >
+                        <Eye className="mr-1.5 h-3.5 w-3.5" />
+                        查看
+                      </Button>
+                    </td>
                   </tr>
                 )
               })}
@@ -256,6 +287,21 @@ export default function TaskHistory() {
           </table>
         </div>
       </div>
+
+      {detailTask ? (
+        <TaskDetailModal
+          task={detailTask}
+          onClose={() => {
+            setDetailTask(null)
+            load({ silent: true }).catch(() => {})
+          }}
+          onStatusChange={(next) => {
+            setTasks((prev) =>
+              prev.map((item) => (item.id === detailTask.id ? { ...item, status: next } : item))
+            )
+          }}
+        />
+      ) : null}
     </div>
   )
 }

@@ -20,6 +20,32 @@ export function isTerminalTaskStatus(status: string) {
   return TERMINAL_TASK_STATUSES.has(status)
 }
 
+export const CANCELLABLE_TASK_STATUSES = new Set([
+  'pending',
+  'claimed',
+  'running',
+  'cancel_requested',
+])
+
+export function isCancellableTaskStatus(status: string) {
+  return CANCELLABLE_TASK_STATUSES.has(status)
+}
+
+export function getTaskTypeText(type: string) {
+  switch (type) {
+    case 'register':
+      return '批量注册'
+    case 'account_check':
+      return '账号检测'
+    case 'account_check_all':
+      return '批量检测'
+    case 'platform_action':
+      return '平台操作'
+    default:
+      return type || '任务'
+  }
+}
+
 export function getTaskStatusText(status: string) {
   switch (status) {
     case 'succeeded':

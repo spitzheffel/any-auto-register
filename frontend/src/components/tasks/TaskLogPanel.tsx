@@ -56,10 +56,25 @@ export function TaskLogPanel({
       }
     }
 
+    // 拉取游标之后的全部历史事件，翻页直到取完
+    const drainEvents = async () => {
+      const pageSize = 200
+      for (let page = 0; page < 20; page += 1) {
+        const data = await apiFetch(`/tasks/${taskId}/events?since=${cursorRef.current}&limit=${pageSize}`)
+        const items = data.items || []
+        for (const item of items) {
+          pushEvent(item)
+        }
+        if (items.length < pageSize) return
+      }
+    }
+
     const syncTask = async () => {
       const latest = await apiFetch(`/tasks/${taskId}`)
       setTask(latest)
       if (isTerminalTaskStatus(latest.status) && !doneRef.current) {
+        // 已结束的任务要先补齐历史日志，否则收尾会把流关掉、日志一条都看不到
+        await drainEvents().catch(() => {})
         pushEvent({ done: true, status: latest.status })
       }
     }
@@ -89,10 +104,7 @@ export function TaskLogPanel({
     const poll = window.setInterval(async () => {
       if (doneRef.current || sseHealthyRef.current) return
       try {
-        const data = await apiFetch(`/tasks/${taskId}/events?since=${cursorRef.current}`)
-        for (const item of data.items || []) {
-          pushEvent(item)
-        }
+        await drainEvents()
         await syncTask()
       } catch {
         // passive

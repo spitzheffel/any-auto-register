@@ -316,25 +316,31 @@ def mark_incomplete_tasks_interrupted() -> None:
 
 
 def request_cancel(task_id: str) -> Optional[dict[str, Any]]:
+    changed: list[bool] = []
     task = _mutate_task(
         task_id,
-        lambda model: _request_cancel_mutation(model),
+        lambda model: changed.append(_request_cancel_mutation(model)),
     )
     if not task:
         return None
-    append_task_event(task_id, "已请求取消任务", event_type="state", level="warning")
+    if any(changed):
+        append_task_event(task_id, "已请求取消任务", event_type="state", level="warning")
     return serialize_task(task)
 
 
-def _request_cancel_mutation(task: TaskModel) -> None:
+def _request_cancel_mutation(task: TaskModel) -> bool:
+    """执行取消状态流转，返回是否真的改变了任务状态。"""
     if task.status in TERMINAL_TASK_STATUSES:
-        return
+        return False
     if task.status == TASK_STATUS_PENDING:
         task.status = TASK_STATUS_CANCELLED
         task.finished_at = _utcnow()
         task.error = task.error or "任务在开始前被取消"
-    else:
-        task.status = TASK_STATUS_CANCEL_REQUESTED
+        return True
+    if task.status == TASK_STATUS_CANCEL_REQUESTED:
+        return False
+    task.status = TASK_STATUS_CANCEL_REQUESTED
+    return True
 
 
 def claim_next_runnable_task(
