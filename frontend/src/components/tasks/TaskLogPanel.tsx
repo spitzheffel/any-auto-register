@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { API_BASE, apiFetch } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { API_BASE, apiFetch, copyToClipboard } from '@/lib/utils'
 import { getTaskStatusText, isTerminalTaskStatus } from '@/lib/tasks'
 
 export function TaskLogPanel({
@@ -130,84 +131,78 @@ export function TaskLogPanel({
   const progressPercent = progressTotal > 0 ? Math.min(100, Math.round((progressCurrent / progressTotal) * 100)) : 0
   const errorText = task?.error || (Array.isArray(task?.errors) ? task.errors[0] : '')
   const statusTone =
-    currentStatus === 'succeeded' ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' :
-    currentStatus === 'failed' ? 'border-red-400/40 bg-red-400/10 text-red-200' :
-    currentStatus === 'cancelled' || currentStatus === 'interrupted' ? 'border-amber-400/40 bg-amber-400/10 text-amber-200' :
-    'border-sky-400/40 bg-sky-400/10 text-sky-200'
+    currentStatus === 'succeeded' ? 'text-emerald-500' :
+    currentStatus === 'failed' ? 'text-red-500' :
+    currentStatus === 'cancelled' || currentStatus === 'interrupted' ? 'text-amber-500' :
+    'text-amber-500'
+  const progressTone =
+    currentStatus === 'failed' ? 'bg-red-500' :
+    currentStatus === 'succeeded' ? 'bg-emerald-500' :
+    'bg-[var(--accent)]'
 
   const copyLogs = () => {
-    navigator.clipboard?.writeText(lines.join('\n')).catch(() => {})
+    copyToClipboard(lines.join('\n')).catch(() => {})
   }
 
   return (
-    <div className="flex h-full flex-col gap-4">
-      <div className="grid gap-3 md:grid-cols-3">
-        <div className={`rounded-2xl border px-4 py-3 ${statusTone}`}>
-          <div className="text-[11px] uppercase tracking-[0.18em] opacity-70">Status</div>
-          <div className="mt-1 text-sm font-semibold">{getTaskStatusText(currentStatus)}</div>
+    <div className="flex h-full flex-col gap-3">
+      <div className="grid gap-3 grid-cols-3">
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
+          <div className="text-[11px] text-[var(--text-muted)]">状态</div>
+          <div className={`mt-1 text-sm font-semibold ${statusTone}`}>{getTaskStatusText(currentStatus)}</div>
         </div>
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">Progress</div>
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
+          <div className="text-[11px] text-[var(--text-muted)]">进度</div>
           <div className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{progress.label || task?.progress || '0/0'}</div>
         </div>
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">Events</div>
-          <div className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{lines.length} 条日志</div>
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
+          <div className="text-[11px] text-[var(--text-muted)]">日志</div>
+          <div className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{lines.length} 条</div>
         </div>
       </div>
 
-      <div className="h-2 overflow-hidden rounded-full bg-[var(--bg-hover)] ring-1 ring-[var(--border)]">
+      <div className="h-1.5 overflow-hidden rounded-full bg-[var(--chip-bg)]">
         <div
-          className={`h-full rounded-full transition-all duration-500 ${
-            currentStatus === 'failed' ? 'bg-red-400' :
-            currentStatus === 'succeeded' ? 'bg-emerald-400' :
-            'bg-sky-400'
-          }`}
+          className={`h-full rounded-full ${progressTone}`}
           style={{ width: `${progressTotal > 0 ? progressPercent : (isTerminalTaskStatus(currentStatus) ? 100 : 18)}%` }}
         />
       </div>
 
       {errorText ? (
-        <div className="rounded-2xl border border-red-400/35 bg-red-500/10 px-4 py-3 text-sm text-red-100">
-          <div className="mb-1 font-semibold">失败原因</div>
-          <div className="break-words text-red-100/85">{errorText}</div>
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3.5 py-2.5 text-xs leading-5 text-red-400">
+          <div className="mb-1 font-medium">失败原因</div>
+          <div className="break-words">{errorText}</div>
         </div>
       ) : null}
 
       <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">Live Log</div>
-          <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">实时执行日志</div>
-        </div>
-        <button
-          type="button"
-          onClick={copyLogs}
-          className="rounded-full border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-        >
+        <div className="text-sm font-medium text-[var(--text-primary)]">执行日志</div>
+        <Button type="button" variant="outline" size="sm" onClick={copyLogs} disabled={lines.length === 0}>
           复制日志
-        </button>
+        </Button>
       </div>
 
-      <div className="min-h-[260px] flex-1 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--bg-input)] p-4 font-mono text-xs ">
-        {lines.length === 0 && (
-          <div className="flex h-full min-h-[180px] items-center justify-center rounded-2xl border border-dashed border-[var(--border)] text-[var(--text-muted)]">
+      <div className="min-h-[260px] flex-1 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--bg-input)] p-3 font-mono text-xs leading-5">
+        {lines.length === 0 ? (
+          <div className="flex h-full min-h-[180px] items-center justify-center text-[var(--text-muted)]">
             等待任务日志...
           </div>
+        ) : (
+          <div className="space-y-1">
+            {lines.map((line, index) => (
+              <div
+                key={index}
+                className={
+                  line.includes('✗') || line.includes('失败') || line.includes('错误') ? 'text-red-500' :
+                  line.includes('✓') || line.includes('成功') ? 'text-emerald-500' :
+                  'text-[var(--text-secondary)]'
+                }
+              >
+                {line}
+              </div>
+            ))}
+          </div>
         )}
-        <div className="space-y-1.5">
-          {lines.map((line, index) => (
-            <div
-              key={index}
-              className={`rounded-xl border border-white/5 bg-white/[0.025] px-3 py-2 leading-5 ${
-                line.includes('✓') || line.includes('成功') ? 'text-emerald-400' :
-                line.includes('✗') || line.includes('失败') || line.includes('错误') ? 'text-red-400' :
-                'text-[var(--text-secondary)]'
-              }`}
-            >
-              {line}
-            </div>
-          ))}
-        </div>
         <div ref={bottomRef} />
       </div>
     </div>
