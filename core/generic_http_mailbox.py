@@ -267,7 +267,7 @@ class GenericHttpMailbox(BaseMailbox):
 
     # ── BaseMailbox 接口 ──────────────────────────────────────────────
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         self._run_auth()
 
         email_mode = self._pipeline.get("email_mode", "fixed")

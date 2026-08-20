@@ -225,30 +225,68 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
         material = f"{self.pool_file}\n{self.pool_text}".encode("utf-8")
         return hashlib.sha256(material).hexdigest()[:16]
 
-    def _reserve(self, entry: LocalMicrosoftMailboxEntry) -> None:
+    @staticmethod
+    def _normalize_platform(platform: str) -> str:
+        return str(platform or "").strip().lower()
+
+    @staticmethod
+    def _is_legacy_global(record: dict) -> bool:
+        return bool(record) and "platforms" not in record and bool(record.get("reserved_at"))
+
+    def _is_used_for(self, record: dict, platform: str) -> bool:
+        if not record:
+            return False
+        if self._is_legacy_global(record):
+            return True
+        platforms = record.get("platforms")
+        if not isinstance(platforms, dict):
+            return False
+        return platform in platforms
+
+    def _reserve(self, entry: LocalMicrosoftMailboxEntry, platform: str = "") -> None:
         if self.allow_reuse:
             return
+        plat = self._normalize_platform(platform)
         state = self._state()
         used = dict(state.get("used") or {})
+        record = dict(used.get(entry.key) or {})
+        if self._is_legacy_global(record):
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        platforms = dict(record.get("platforms") or {}) if isinstance(record.get("platforms"), dict) else {}
+        platforms[plat] = {"reserved_at": now}
         used[entry.key] = {
             "email": entry.email,
-            "reserved_at": datetime.now(timezone.utc).isoformat(),
             "source_id": self._source_id(),
+            "platforms": platforms,
         }
         state["used"] = used
         self._save_state(state)
 
-    def _unreserve(self, key: str) -> None:
+    def _unreserve(self, key: str, platform: str = "") -> None:
         if self.allow_reuse:
             return
         normalized = str(key or "").strip().lower()
         if not normalized:
             return
+        plat = self._normalize_platform(platform)
         state = self._state()
         used = dict(state.get("used") or {})
-        if normalized not in used:
+        record = dict(used.get(normalized) or {})
+        if not record:
             return
-        used.pop(normalized, None)
+        if self._is_legacy_global(record):
+            used.pop(normalized, None)
+            state["used"] = used
+            self._save_state(state)
+            return
+        platforms = dict(record.get("platforms") or {}) if isinstance(record.get("platforms"), dict) else {}
+        platforms.pop(plat, None)
+        if platforms:
+            record["platforms"] = platforms
+            used[normalized] = record
+        else:
+            used.pop(normalized, None)
         state["used"] = used
         self._save_state(state)
 
@@ -262,22 +300,24 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
             or ""
         ).strip().lower()
 
-    def _available_entry(self) -> LocalMicrosoftMailboxEntry:
+    def _available_entry(self, platform: str = "") -> LocalMicrosoftMailboxEntry:
         entries = self._entries()
         state = self._state()
-        used = set((state.get("used") or {}).keys())
+        used = dict(state.get("used") or {})
+        plat = self._normalize_platform(platform)
         for entry in entries:
-            if self.allow_reuse or entry.key not in used:
+            if self.allow_reuse or not self._is_used_for(dict(used.get(entry.key) or {}), plat):
                 return entry
         raise RuntimeError(f"本地微软邮箱池已用尽: total={len(entries)}")
 
-    def peek_email(self) -> str:
-        return self._available_entry().email
+    def peek_email(self, platform: str = "") -> str:
+        return self._available_entry(platform=platform).email
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
+        plat = self._normalize_platform(platform)
         with self._lock:
-            entry = self._available_entry()
-            self._reserve(entry)
+            entry = self._available_entry(platform=plat)
+            self._reserve(entry, plat)
 
         credentials = entry.credentials()
         credentials = {key: value for key, value in credentials.items() if value}
@@ -308,15 +348,19 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
                         "email": entry.email,
                         "source": "xinlan_common",
                         "reserved": not self.allow_reuse,
+                        "platform": plat,
                     },
                 },
             },
         )
 
-    def release(self, account: MailboxAccount, reason: str = "") -> None:
-        """注册失败后把占用还回池子，成功路径保持占用。"""
+    def report_success(self, account: MailboxAccount, platform: str = "") -> None:
+        return None
+
+    def release(self, account: MailboxAccount, reason: str = "", platform: str = "") -> None:
+        """注册失败后只释放当前平台占用。旧全局锁整条解锁。"""
         with self._lock:
-            self._unreserve(self._account_key(account))
+            self._unreserve(self._account_key(account), platform=platform)
 
     def _entry_for_account(self, account: MailboxAccount) -> LocalMicrosoftMailboxEntry:
         account_email = str(getattr(account, "email", "") or "").strip().lower()

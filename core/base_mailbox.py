@@ -27,8 +27,8 @@ class MailboxAccount:
 
 class BaseMailbox(ABC):
     @abstractmethod
-    def get_email(self) -> MailboxAccount:
-        """获取一个可用邮箱"""
+    def get_email(self, platform: str = "") -> MailboxAccount:
+        """获取一个可用邮箱。platform 为插件 name（如 trae），渠道可忽略。"""
         ...
 
     @abstractmethod
@@ -48,25 +48,25 @@ class BaseMailbox(ABC):
         """等待并返回验证链接。默认由具体 provider 自行实现。"""
         raise NotImplementedError(f"{self.__class__.__name__} 暂不支持 wait_for_link()")
 
-    def report_success(self, account: MailboxAccount) -> None:
+    def report_success(self, account: MailboxAccount, platform: str = "") -> None:
         """注册成功后的可选生命周期 hook。默认空操作，渠道自行覆盖。"""
         return None
 
-    def release(self, account: MailboxAccount, reason: str = "") -> None:
+    def release(self, account: MailboxAccount, reason: str = "", platform: str = "") -> None:
         """注册失败或取消后的可选生命周期 hook。默认空操作，渠道自行覆盖。"""
         return None
 
 
-def notify_mailbox_outcome(mailbox, identity, *, ok: bool, reason: str = "", log_fn=None) -> None:
+def notify_mailbox_outcome(mailbox, identity, *, ok: bool, reason: str = "", platform: str = "", log_fn=None) -> None:
     """把一次注册成败通知给邮箱渠道。无 mailbox/account 时跳过；hook 异常不影响注册结果。"""
     account = getattr(identity, "mailbox_account", None)
     if not mailbox or not account:
         return
     try:
         if ok:
-            mailbox.report_success(account)
+            mailbox.report_success(account, platform=platform)
         else:
-            mailbox.release(account, reason=reason)
+            mailbox.release(account, reason=reason, platform=platform)
     except Exception as exc:
         message = f"邮箱生命周期 hook 失败: {exc}"
         if log_fn:
@@ -103,12 +103,12 @@ class FallbackMailbox(BaseMailbox):
             return mailbox
         raise RuntimeError(f"未找到邮箱 provider 上下文: {account.email}")
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         errors: list[str] = []
         for provider_key, mailbox in self.providers:
             try:
                 print(f"[Mailbox] 尝试 provider: {provider_key}")
-                account = mailbox.get_email()
+                account = mailbox.get_email(platform=platform)
                 self._accounts[str(account.email or "").strip()] = mailbox
                 self._inject_provider_metadata(account, provider_key)
                 print(f"[Mailbox] 使用 provider 成功: {provider_key} -> {account.email}")
@@ -143,11 +143,11 @@ class FallbackMailbox(BaseMailbox):
             before_ids=before_ids,
         )
 
-    def report_success(self, account: MailboxAccount) -> None:
-        self._resolve_mailbox(account).report_success(account)
+    def report_success(self, account: MailboxAccount, platform: str = "") -> None:
+        self._resolve_mailbox(account).report_success(account, platform=platform)
 
-    def release(self, account: MailboxAccount, reason: str = "") -> None:
-        self._resolve_mailbox(account).release(account, reason=reason)
+    def release(self, account: MailboxAccount, reason: str = "", platform: str = "") -> None:
+        self._resolve_mailbox(account).release(account, reason=reason, platform=platform)
 
 
 def _extract_verification_link(text: str, keyword: str = "") -> str | None:
@@ -400,7 +400,7 @@ class LaoudoMailbox(BaseMailbox):
         self.api = (api_url or DEFAULT_LAOUDO_API_URL).rstrip("/")
         self._ua = "Mozilla/5.0"
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         return MailboxAccount(
             email=self._email,
             account_id=self._account_id,
@@ -523,7 +523,7 @@ class AitreMailbox(BaseMailbox):
         self._email = email
         self.api = (api_url or DEFAULT_AITRE_API_URL).rstrip("/")
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         return MailboxAccount(email=self._email)
 
     def get_current_ids(self, account: MailboxAccount) -> set:
@@ -607,7 +607,7 @@ class TempMailLolMailbox(BaseMailbox):
         self._token = None
         self._email = None
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         import requests
         r = requests.post(f"{self.api}/inbox/create",
             json={},
@@ -788,7 +788,7 @@ class YYDSMailMailbox(BaseMailbox):
         ])
 
     # ── BaseMailbox 契约实现 ─────────────────────────────────────
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         if not self.api_key:
             raise RuntimeError("YYDS Mail API Key 未配置")
         local_part = self._random_local_part()
@@ -1005,7 +1005,7 @@ class TempMailWebMailbox(BaseMailbox):
 
         return self._decode_json_response(result, action)
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         import json
 
         data = self._request_json("POST", "/mailbox")
@@ -1171,7 +1171,7 @@ class DuckMailMailbox(BaseMailbox):
             "x-api-provider-base-url": self.provider_url,
         }
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         import requests, random, string
         username = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
         password = "Test" + "".join(random.choices(string.digits, k=8)) + "!"
@@ -1324,7 +1324,7 @@ class CFWorkerMailbox(BaseMailbox):
             h["x-fingerprint"] = self.fingerprint
         return h
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         import requests, random, string
         name = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
         payload = {"enablePrefix": True, "name": name}
@@ -1581,7 +1581,7 @@ class MoeMailMailbox(BaseMailbox):
     # 优先用这些域名（信誉较好，不易被 AWS/Google 等拒绝）
     _PREFERRED_DOMAINS = ("sall.cc", "cnmlgb.de", "zhooo.org", "coolkid.icu")
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         self._session_token = self._configured_session_token or None
         self._session = None
         self._ensure_session()
@@ -1752,7 +1752,7 @@ class FreemailMailbox(BaseMailbox):
         self._session = s
         return s
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         if not self._session:
             self._get_session()
         import requests
@@ -1930,7 +1930,7 @@ class TestmailMailbox(BaseMailbox):
             for key in ("subject", "text", "html")
         )
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         import time
 
         self._assert_ready()
@@ -2079,7 +2079,7 @@ class DDGEmailMailbox(BaseMailbox):
             "referer": "https://duckduckgo.com/",
         }
 
-    def get_email(self) -> MailboxAccount:
+    def get_email(self, platform: str = "") -> MailboxAccount:
         import requests
         r = insecure_request(
             requests.post, self.DDG_API,

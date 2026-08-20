@@ -546,6 +546,7 @@ def _notify_mailbox_from_platform(platform, *, ok: bool, reason: str = "", log_f
         getattr(platform, "_last_identity", None),
         ok=ok,
         reason=reason,
+        platform=str(getattr(platform, "name", "") or ""),
         log_fn=log_fn,
     )
 

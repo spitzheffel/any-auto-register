@@ -81,7 +81,7 @@ class MailboxIdentityProvider(BaseIdentityProvider):
         if not self.mailbox:
             return IdentityMaterial(identity_provider=self.identity_provider, email=requested_email)
 
-        mail_acct = self.mailbox.get_email()
+        mail_acct = self.mailbox.get_email(platform=str((self.extra or {}).get("platform") or ""))
         email = getattr(mail_acct, "email", "") or ""
         if not requested_email and not email:
             provider_name = getattr(self.mailbox, "__class__", type(self.mailbox)).__name__

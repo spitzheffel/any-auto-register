@@ -445,7 +445,7 @@ class BasePlatform(ABC):
         return create_identity_provider(
             mode,
             mailbox=getattr(self, "mailbox", None),
-            extra=self.config.extra,
+            extra={**(self.config.extra or {}), "platform": self.name},
         )
 
     def _resolve_identity(self, email: str = None, *, require_email: bool = True):
