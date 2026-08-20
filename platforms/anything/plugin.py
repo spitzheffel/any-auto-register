@@ -26,6 +26,8 @@ class AnythingPlatform(BasePlatform):
     name = "anything"
     display_name = "Anything"
     version = "1.0.0"
+    supported_executors = ["protocol"]
+    supported_identity_modes = ["mailbox"]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)

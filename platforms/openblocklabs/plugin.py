@@ -12,6 +12,9 @@ class OpenBlockLabsPlatform(BasePlatform):
     name = "openblocklabs"
     display_name = "OpenBlockLabs"
     version = "1.0.0"
+    supported_executors = ["protocol", "headless", "headed"]
+    supported_identity_modes = ["mailbox", "oauth_browser"]
+    supported_oauth_providers = ["github"]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)

@@ -11,6 +11,9 @@ class TavilyPlatform(BasePlatform):
     name = "tavily"
     display_name = "Tavily"
     version = "1.0.0"
+    supported_executors = ["protocol", "headless", "headed"]
+    supported_identity_modes = ["mailbox", "oauth_browser"]
+    supported_oauth_providers = ["google", "github", "linkedin", "microsoft"]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)
