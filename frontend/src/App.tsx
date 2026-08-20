@@ -181,6 +181,7 @@ function Sidebar({
                 { label: '验证服务', hash: 'captcha' },
                 { label: '接码服务', hash: 'sms' },
                 { label: '代理资源', hash: 'proxies' },
+                { label: '支付卡', hash: 'cards' },
                 { label: 'ChatGPT', hash: 'chatgpt' },
                 { label: '高级', hash: 'advanced' },
                 { label: '关于', hash: 'about' },

@@ -52,6 +52,7 @@ from api.platform_capabilities import router as platform_capabilities_router
 from api.platforms import router as platforms_router
 from api.provider_definitions import router as provider_definitions_router
 from api.provider_settings import router as provider_settings_router
+from api.cards import router as cards_router
 from api.proxies import router as proxies_router
 from api.sms import router as sms_router
 from api.stats import router as stats_router
@@ -113,6 +114,7 @@ app.include_router(platform_capabilities_router, prefix="/api")
 app.include_router(provider_definitions_router, prefix="/api")
 app.include_router(provider_settings_router, prefix="/api")
 app.include_router(proxies_router, prefix="/api")
+app.include_router(cards_router, prefix="/api")
 app.include_router(sms_router, prefix="/api")
 app.include_router(stats_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")

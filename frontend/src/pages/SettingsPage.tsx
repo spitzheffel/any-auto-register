@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Save, RefreshCw, CheckCircle, ExternalLink, Sparkles } from 'lucide-react'
 import Settings from '@/pages/Settings'
 import Proxies from '@/pages/Proxies'
+import Cards from '@/pages/Cards'
 import AdvancedSettings from '@/components/settings/AdvancedSettings'
 
 /* ------------------------------------------------------------------ */
@@ -379,6 +380,7 @@ export default function SettingsPage({
     captcha: '验证服务',
     sms: '接码服务',
     proxies: '代理资源',
+    cards: '支付卡',
     chatgpt: 'ChatGPT',
     advanced: '高级设置',
     about: '关于',
@@ -393,6 +395,7 @@ export default function SettingsPage({
       {tab === 'general' && <GeneralTab theme={theme} setTheme={setTheme} />}
       {isConfigTab && <Settings embedded defaultTab={tab} />}
       {tab === 'proxies' && <Proxies />}
+      {tab === 'cards' && <Cards />}
       {tab === 'advanced' && <AdvancedSettings />}
       {tab === 'about' && <AboutTab />}
     </div>

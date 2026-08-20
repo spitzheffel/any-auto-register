@@ -300,6 +300,26 @@ class ProxyModel(SQLModel, table=True):
     last_checked: Optional[datetime] = None
 
 
+class PaymentCardModel(SQLModel, table=True):
+    __tablename__ = "payment_cards"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    pan: str = Field(unique=True, index=True)
+    last4: str = Field(default="", index=True)
+    brand: str = ""
+    exp_month: int = 0
+    exp_year: int = 0
+    cvv: str = ""
+    holder_name: str = ""
+    region: str = ""
+    note: str = ""
+    is_active: bool = True
+    success_count: int = 0
+    fail_count: int = 0
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 def save_account(account) -> 'AccountModel':
     """从 base_platform.Account 存入数据库（同平台同邮箱则更新）"""
     from core.account_graph import sync_platform_account_graph
