@@ -448,7 +448,7 @@ function RegisterModal({
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-xs text-[var(--text-secondary)]">
                   <div>注册身份: <span className="text-[var(--text-primary)]">{selectedRegistration?.label || '-'}</span></div>
                   <div className="mt-1">执行方式: <span className="text-[var(--text-primary)]">{selectedExecutor?.label || '-'}</span></div>
-                  <div className="mt-1">验证策略: <span className="text-[var(--text-primary)]">{getCaptchaStrategyLabel(selection.executorType)}</span></div>
+                  <div className="mt-1">验证策略: <span className="text-[var(--text-primary)]">{getCaptchaStrategyLabel(selection.executorType, configOptions.captcha_policy, configOptions.captcha_providers)}</span></div>
                   {selection.identityProvider === 'oauth_browser' && !reusableBrowser && (
                     <div className="mt-2 text-amber-400">后台浏览器自动依赖 Chrome Profile 或 Chrome CDP，未配置时只允许可视浏览器自动。</div>
                   )}
@@ -802,38 +802,30 @@ function ActionTaskModal({
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div
-        className="dialog-panel flex w-[min(960px,calc(100vw-32px))] max-w-none flex-col overflow-hidden"
+        className="dialog-panel dialog-panel-lg flex flex-col"
         onClick={e => e.stopPropagation()}
-        style={{ maxHeight: '90vh' }}
       >
-        <div className="relative overflow-hidden border-b border-[var(--border)] px-6 py-5">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_0%,rgba(9,182,162,0.18),transparent_34%),linear-gradient(90deg,rgba(255,255,255,0.04),transparent)]" />
-          <div className="relative flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="mb-2 inline-flex rounded-full border border-[var(--border)] bg-[var(--chip-bg)] px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">
-                Platform Action
-              </div>
-              <h2 className="truncate text-lg font-semibold text-[var(--text-primary)]">{title}</h2>
-              <p className="mt-1 text-xs text-[var(--text-muted)]">任务状态、错误摘要与实时日志集中展示</p>
-            </div>
-            <div className="flex items-center gap-2">
-              {taskStatus ? (
-                <Badge variant={TASK_STATUS_VARIANTS[taskStatus] || 'secondary'}>
-                  {getTaskStatusText(taskStatus)}
-                </Badge>
-              ) : null}
-              <button onClick={onClose} className="rounded-full border border-[var(--border)] bg-[var(--bg-hover)] p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
+        <div className="flex-shrink-0 flex items-center justify-between gap-4 px-6 py-4 border-b border-[var(--border)]">
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold text-[var(--text-primary)]">{title}</h2>
+            <p className="mt-0.5 truncate font-mono text-xs text-[var(--text-muted)]">{taskId}</p>
+          </div>
+          <div className="flex flex-shrink-0 items-center gap-3">
+            {taskStatus ? (
+              <Badge variant={TASK_STATUS_VARIANTS[taskStatus] || 'secondary'}>
+                {getTaskStatusText(taskStatus)}
+              </Badge>
+            ) : null}
+            <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+              <X className="h-4 w-4" />
+            </button>
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="flex-1 overflow-y-auto px-6 py-4">
           <TaskLogPanel taskId={taskId} onDone={onDone} />
         </div>
-        <div className="flex items-center justify-between border-t border-[var(--border)] px-6 py-3 text-xs text-[var(--text-muted)]">
-          <span>任务 ID: {taskId}</span>
-          <Button variant="outline" size="sm" onClick={onClose}>
+        <div className="flex-shrink-0 flex justify-end px-6 py-4 border-t border-[var(--border)]">
+          <Button variant="outline" onClick={onClose}>
             关闭
           </Button>
         </div>
