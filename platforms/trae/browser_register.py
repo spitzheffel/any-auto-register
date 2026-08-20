@@ -21,6 +21,28 @@ from camoufox.sync_api import Camoufox
 
 TRAE_URL = "https://www.trae.ai"
 TRAE_PASSPORT_DOMAIN = "ug-normal.trae.ai"
+SEND_CODE_PATH = "/passport/web/email/send_code"
+
+
+def _send_code_rejection(responses: list) -> Optional[str]:
+    """从捕获的 send_code 响应里取出被拒原因，成功或无法解析时返回 None。"""
+    for resp in reversed(responses):
+        try:
+            body = resp.json()
+        except Exception:
+            continue
+        if not isinstance(body, dict):
+            continue
+        if body.get("message") == "success":
+            return None
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        return str(
+            data.get("description")
+            or data.get("error_code")
+            or body.get("message")
+            or "未知错误"
+        )
+    return None
 
 
 def _build_proxy_config(proxy: Optional[str]) -> Optional[dict]:
@@ -198,6 +220,12 @@ class TraeBrowserRegister:
         with Camoufox(**launch_opts) as browser:
             page = browser.new_page()
 
+            send_code_responses = []
+            page.on(
+                "response",
+                lambda resp: send_code_responses.append(resp) if SEND_CODE_PATH in resp.url else None,
+            )
+
             # 1. 打开注册页
             self.log("打开 Trae 注册页")
             page.goto(f"{TRAE_URL}/sign-up", wait_until="domcontentloaded", timeout=30000)
@@ -275,7 +303,17 @@ class TraeBrowserRegister:
                 time.sleep(0.3)
                 page.keyboard.press("Enter")
 
-            time.sleep(2)
+            # 校验发送结果，避免被拒后空等验证码直到超时
+            deadline_resp = time.time() + 15
+            while time.time() < deadline_resp and not send_code_responses:
+                time.sleep(0.5)
+            if not send_code_responses:
+                self.log("⚠️ 未捕获到 send_code 请求，可能没有真正点到发送按钮")
+            else:
+                rejection = _send_code_rejection(send_code_responses)
+                if rejection:
+                    raise RuntimeError(f"Trae 拒绝发送验证码: {rejection}")
+                self.log("验证码已发送，等待邮件...")
 
             # 4. 等待 OTP 输入框
             self.log("等待邮箱验证码...")
@@ -389,6 +427,9 @@ class TraeBrowserRegister:
                 self.log("⚠️ 未从 Cookie 获取到 token，尝试等待...")
                 time.sleep(5)
                 token, user_id, region = _get_trae_cloudide_token(page, self.log)
+
+            if not token:
+                raise RuntimeError("未获取到 Trae token，账号无法使用")
 
             self.log(f"✓ 注册成功: {email}")
             return {

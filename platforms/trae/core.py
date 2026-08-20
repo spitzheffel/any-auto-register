@@ -77,6 +77,9 @@ class TraeRegister:
                              json={"product_ids": ["2"],
                                    "result_url": "https://www.trae.ai/account-setting"
                                                  "?type=upgrade&identity=1#subscription"})
+            if r.status_code != 200:
+                self.log(f"  ⚠️ 升级链接获取失败（不影响注册）status={r.status_code} resp={r.text[:200]}")
+                return ""
             self.log(f"  create_order status={r.status_code} resp={r.text[:200]}")
             return r.json().get("order_info", {}).get("cashier_url", "")
         except Exception as e:

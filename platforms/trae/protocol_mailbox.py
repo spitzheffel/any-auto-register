@@ -28,6 +28,8 @@ class TraeProtocolMailboxWorker:
         user_id = self.client.step3_register(email, use_password, otp)
         self.client.step4_trae_login()
         token = self.client.step5_get_token()
+        if not token:
+            raise RuntimeError("注册接口已通过但未取到 Trae token，账号无法使用")
         result = self.client.step6_check_login()
         cashier_url = self.client.step7_create_order(token)
         return {
