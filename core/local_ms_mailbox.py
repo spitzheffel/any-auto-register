@@ -238,6 +238,30 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
         state["used"] = used
         self._save_state(state)
 
+    def _unreserve(self, key: str) -> None:
+        if self.allow_reuse:
+            return
+        normalized = str(key or "").strip().lower()
+        if not normalized:
+            return
+        state = self._state()
+        used = dict(state.get("used") or {})
+        if normalized not in used:
+            return
+        used.pop(normalized, None)
+        state["used"] = used
+        self._save_state(state)
+
+    def _account_key(self, account: MailboxAccount) -> str:
+        extra = dict(getattr(account, "extra", {}) or {})
+        resource = dict(extra.get("provider_resource") or {})
+        return str(
+            getattr(account, "account_id", "")
+            or resource.get("resource_identifier")
+            or getattr(account, "email", "")
+            or ""
+        ).strip().lower()
+
     def _available_entry(self) -> LocalMicrosoftMailboxEntry:
         entries = self._entries()
         state = self._state()
@@ -288,6 +312,11 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
                 },
             },
         )
+
+    def release(self, account: MailboxAccount, reason: str = "") -> None:
+        """注册失败后把占用还回池子，成功路径保持占用。"""
+        with self._lock:
+            self._unreserve(self._account_key(account))
 
     def _entry_for_account(self, account: MailboxAccount) -> LocalMicrosoftMailboxEntry:
         account_email = str(getattr(account, "email", "") or "").strip().lower()
