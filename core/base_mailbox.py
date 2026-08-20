@@ -48,6 +48,32 @@ class BaseMailbox(ABC):
         """等待并返回验证链接。默认由具体 provider 自行实现。"""
         raise NotImplementedError(f"{self.__class__.__name__} 暂不支持 wait_for_link()")
 
+    def report_success(self, account: MailboxAccount) -> None:
+        """注册成功后的可选生命周期 hook。默认空操作，渠道自行覆盖。"""
+        return None
+
+    def release(self, account: MailboxAccount, reason: str = "") -> None:
+        """注册失败或取消后的可选生命周期 hook。默认空操作，渠道自行覆盖。"""
+        return None
+
+
+def notify_mailbox_outcome(mailbox, identity, *, ok: bool, reason: str = "", log_fn=None) -> None:
+    """把一次注册成败通知给邮箱渠道。无 mailbox/account 时跳过；hook 异常不影响注册结果。"""
+    account = getattr(identity, "mailbox_account", None)
+    if not mailbox or not account:
+        return
+    try:
+        if ok:
+            mailbox.report_success(account)
+        else:
+            mailbox.release(account, reason=reason)
+    except Exception as exc:
+        message = f"邮箱生命周期 hook 失败: {exc}"
+        if log_fn:
+            log_fn(message)
+        else:
+            logger.warning(message)
+
 
 class FallbackMailbox(BaseMailbox):
     """按顺序尝试多个 provider，创建邮箱成功后固定使用同一 provider 收件。"""
@@ -116,6 +142,12 @@ class FallbackMailbox(BaseMailbox):
             timeout=timeout,
             before_ids=before_ids,
         )
+
+    def report_success(self, account: MailboxAccount) -> None:
+        self._resolve_mailbox(account).report_success(account)
+
+    def release(self, account: MailboxAccount, reason: str = "") -> None:
+        self._resolve_mailbox(account).release(account, reason=reason)
 
 
 def _extract_verification_link(text: str, keyword: str = "") -> str | None:

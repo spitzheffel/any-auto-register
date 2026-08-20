@@ -538,6 +538,18 @@ def _build_platform_instance(platform_name: str, payload: dict[str, Any], logger
     return platform
 
 
+def _notify_mailbox_from_platform(platform, *, ok: bool, reason: str = "", log_fn=None) -> None:
+    from core.base_mailbox import notify_mailbox_outcome
+
+    notify_mailbox_outcome(
+        getattr(platform, "mailbox", None),
+        getattr(platform, "_last_identity", None),
+        ok=ok,
+        reason=reason,
+        log_fn=log_fn,
+    )
+
+
 def _run_single_account_check(account_id: int, logger: TaskLogger | None = None) -> tuple[bool, dict[str, Any]]:
     with Session(engine) as session:
         model = session.get(AccountModel, account_id)
@@ -758,12 +770,15 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             return "__cancel_requested__"
         resolved_proxy = proxy or proxy_pool.get_next()
         platform = _build_platform_instance(platform_name, payload, logger, resolved_proxy=resolved_proxy, shared_mailbox=shared_mailbox)
+        mailbox_notified = False
         try:
             logger.log(f"开始注册第 {index + 1}/{count} 个账号")
             if resolved_proxy:
                 logger.log(f"使用代理: {resolved_proxy}")
             account = platform.register(email=email, password=password)
             save_account(account)
+            _notify_mailbox_from_platform(platform, ok=True, log_fn=logger.log)
+            mailbox_notified = True
             _auto_followup_windsurf_payment(
                 platform_name=platform_name,
                 payload=payload,
@@ -789,6 +804,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             if resolved_proxy:
                 proxy_pool.report_fail(resolved_proxy)
             error = str(exc)
+            if not mailbox_notified:
+                _notify_mailbox_from_platform(platform, ok=False, reason=error, log_fn=logger.log)
             logger.record_error(error)
             logger.log(f"✗ 注册失败: {error}", level="error")
             _save_task_log(platform_name, email or "", "failed", error=error)
