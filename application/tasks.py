@@ -723,7 +723,11 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     proxy = payload.get("proxy") or None
     extra = dict(payload.get("extra") or {})
     sms_provider_key, sms_settings = _resolve_sms_provider_for_task(extra)
-    herosms_enabled = sms_provider_key in ("herosms", "herosms_api") and bool(
+    # 只有浏览器注册流程会构造 phone_callback 去租号，协议流程压根不碰短信，
+    # 套用 HeroSMS 的复用超发逻辑只会污染进度和日志
+    executor_type = str(payload.get("executor_type", "protocol") or "protocol").strip().lower()
+    phone_capable = executor_type in {"headless", "headed"}
+    herosms_enabled = phone_capable and sms_provider_key in ("herosms", "herosms_api") and bool(
         str(sms_settings.get("herosms_api_key") or "").strip()
     )
     hero_extra_max = max(_int_config(sms_settings.get("register_phone_extra_max"), 3), 0) if herosms_enabled else 0
