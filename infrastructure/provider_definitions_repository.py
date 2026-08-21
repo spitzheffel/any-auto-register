@@ -97,6 +97,22 @@ _BUILTIN_DEFINITIONS: list[dict] = [
     },
     {
         "provider_type": "mailbox",
+        "provider_key": "mail_script_api",
+        "label": "Mail 脚本接口",
+        "description": "自建 Mail 的 /api/v1/keys：用 Bearer API Key 按分组租微软邮箱、收验证码，占用按平台隔离",
+        "driver_type": "mail_script_api",
+        "default_auth_mode": "apikey",
+        "enabled": True,
+        "category": "selfhost",
+        "auth_modes": [{"value": "apikey", "label": "API Key"}],
+        "fields": [
+            {"key": "mail_script_base_url", "label": "服务地址", "placeholder": "http://127.0.0.1:3000", "category": "connection"},
+            {"key": "mail_script_api_key", "label": "API Key", "placeholder": "mlk_...", "secret": True, "category": "auth"},
+            {"key": "mail_script_group", "label": "账号分组", "placeholder": "register-pool", "category": "identity"},
+        ],
+    },
+    {
+        "provider_type": "mailbox",
         "provider_key": "freemail_api",
         "label": "FreeMail（自动生成）",
         "description": "自部署邮箱服务，支持账号密码或 Admin Token 认证",

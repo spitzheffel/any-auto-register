@@ -292,6 +292,17 @@ def _create_yydsmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
     )
 
 
+def _create_mail_script(extra: dict, proxy: str | None) -> 'BaseMailbox':
+    from core.mail_script_mailbox import MailScriptMailbox
+
+    return MailScriptMailbox(
+        base_url=extra.get("mail_script_base_url", ""),
+        api_key=extra.get("mail_script_api_key", ""),
+        group=extra.get("mail_script_group", ""),
+        proxy=proxy,
+    )
+
+
 def _create_generic_http(extra: dict, proxy: str | None, *, pipeline_config: dict | None = None) -> 'BaseMailbox':
     from core.generic_http_mailbox import GenericHttpMailbox
     return GenericHttpMailbox(
@@ -315,6 +326,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "local_ms_pool": _create_local_ms_pool,
     "laoudo_api": _create_laoudo,
     "yydsmail_api": _create_yydsmail,
+    "mail_script_api": _create_mail_script,
     # backward-compat fallback
     "generic_http": _create_generic_http,
     "tempmail_lol": _create_tempmail,
@@ -327,6 +339,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "local_ms": _create_local_ms_pool,
     "laoudo": _create_laoudo,
     "yydsmail": _create_yydsmail,
+    "mail_script": _create_mail_script,
 }
 
 

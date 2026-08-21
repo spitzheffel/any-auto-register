@@ -99,6 +99,11 @@ def _test_mailbox(driver_type: str, extra: dict, definition) -> dict:
 
         if hasattr(mailbox, "peek_email"):
             email = mailbox.peek_email()
+            if driver_type in ("mail_script_api", "mail_script"):
+                return {
+                    "ok": True,
+                    "message": "测试成功！API Key 有效，未占用邮箱",
+                }
             return {
                 "ok": True,
                 "message": f"测试成功！可用邮箱: {email}",
