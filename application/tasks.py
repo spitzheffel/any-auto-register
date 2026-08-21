@@ -299,16 +299,20 @@ def mark_incomplete_tasks_interrupted() -> None:
         tasks = session.exec(
             select(TaskModel).where(TaskModel.status.in_(non_terminal))
         ).all()
+        # commit 会让实例过期，出了 session 再读 task.id 会抛 DetachedInstanceError，
+        # 导致有未完成任务时服务根本起不来
+        task_ids = []
         for task in tasks:
+            task_ids.append(task.id)
             task.status = TASK_STATUS_INTERRUPTED
             task.error = task.error or "任务在服务重启后被中断"
             task.finished_at = _utcnow()
             task.updated_at = _utcnow()
             session.add(task)
         session.commit()
-    for task in tasks:
+    for task_id in task_ids:
         append_task_event(
-            task.id,
+            task_id,
             "任务在服务重启后被标记为中断",
             event_type="state",
             level="warning",
