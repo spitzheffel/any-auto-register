@@ -34,6 +34,10 @@ class CursorProtocolMailboxWorker:
         self.log(f"验证码: {otp}")
         self.log("Step4: 提交 OTP...")
         auth_code = self.client.step4_submit_otp(otp, email, state_encoded)
+        if not auth_code:
+            raise RuntimeError(f"Cursor 拒绝了验证码 {otp}，未返回 auth code（验证码可能已过期或不属于本次注册）")
         self.log("Step5: 获取 Token...")
         token = self.client.step5_get_token(auth_code, state_encoded)
+        if not token:
+            raise RuntimeError("注册流程已通过但未取到 WorkosCursorSessionToken，账号无法使用")
         return {"email": email, "password": use_password, "token": token}
