@@ -15,6 +15,24 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 
 TURNSTILE_SITEKEY = "0x4AAAAAAAMNIvC45A4Wjjln"
 
+_ACTION_FAILURE_HINTS = (
+    "invalid captcha",
+    "captcha failed",
+    "failed captcha",
+    "unable to verify",
+    "are you human",
+    "too many requests",
+    "rate limit",
+    "access denied",
+    "unauthorized",
+    "forbidden",
+    "user_already_exists",
+    "email already",
+    "invalid email",
+    "account exists",
+    "something went wrong",
+)
+
 
 def _rand_password(n=16):
     chars = string.ascii_letters + string.digits + "!@#$"
@@ -38,6 +56,79 @@ def _multipart(fields: dict, boundary: str) -> bytes:
     return "".join(parts).encode()
 
 
+def _header_get(resp, name: str) -> str:
+    headers = getattr(resp, "headers", None) or {}
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        for key in (name, name.lower(), name.title()):
+            value = getter(key)
+            if value:
+                return str(value)
+    items = getattr(headers, "items", None)
+    if callable(items):
+        target = name.lower()
+        for key, value in items():
+            if str(key).lower() == target and value:
+                return str(value)
+    return ""
+
+
+def action_redirect(resp) -> str:
+    return (_header_get(resp, "x-action-redirect") or _header_get(resp, "location")).strip()
+
+
+def _compact_text(text: str, limit: int = 240) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    return compact[:limit]
+
+
+def response_preview(resp, limit: int = 240) -> str:
+    status = getattr(resp, "status_code", "?")
+    loc = action_redirect(resp)
+    body = _compact_text(getattr(resp, "text", "") or "", limit)
+    parts = [f"HTTP {status}"]
+    if loc:
+        parts.append(f"redirect={loc[:160]}")
+    if body:
+        parts.append(f"body={body}")
+    return " | ".join(parts)
+
+
+def _quoted_error_values(text: str) -> list[str]:
+    values = []
+    for match in re.finditer(
+        r'"(?:error(?:_description|_message|Message)?|message|digest|code)"\s*:\s*"((?:\\.|[^"\\])*)"',
+        text or "",
+        re.I,
+    ):
+        raw = match.group(1).replace('\\"', '"')
+        if raw and raw.lower() not in {"ok", "success", "none", "null"}:
+            values.append(raw)
+    return values
+
+
+def find_action_failure(resp, *, stuck_on: tuple[str, ...] = ()) -> str:
+    """从 Next.js server action 响应里挑失败信号。没有把握时返回空，避免误杀成功路径。"""
+    status = int(getattr(resp, "status_code", 0) or 0)
+    text = str(getattr(resp, "text", "") or "")
+    loc = action_redirect(resp)
+    if status >= 400:
+        return response_preview(resp)
+    blob = f"{loc}\n{text}".lower()
+    for hint in _ACTION_FAILURE_HINTS:
+        if hint in blob:
+            return f"检测到失败信号 `{hint}`: {response_preview(resp)}"
+    for value in _quoted_error_values(text):
+        lowered = value.lower()
+        if "error" in lowered or any(hint in lowered for hint in _ACTION_FAILURE_HINTS):
+            return f"{value}: {response_preview(resp)}"
+    if loc and stuck_on:
+        loc_l = loc.lower()
+        if any(marker.lower() in loc_l for marker in stuck_on):
+            return f"仍停留在 {stuck_on[0]}: {response_preview(resp)}"
+    return ""
+
+
 class CursorRegister:
     def __init__(self, proxy: str = None, log_fn: Callable = print):
         from curl_cffi import requests as curl_req
@@ -58,6 +149,21 @@ class CursorRegister:
             "next-router-state-tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22(main)%22%2C%7B%22children%22%3A%5B%22(root)%22%2C%7B%22children%22%3A%5B%22(sign-in)%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%5D%7D%5D",
         }
 
+    def _post_action(self, next_action, referer, fields, *, step: str, stuck_on: tuple[str, ...] = ()):
+        bd = _boundary()
+        resp = self.s.post(
+            f"{AUTH}/sign-up",
+            headers=self._base_headers(next_action, referer, boundary=bd),
+            data=_multipart(fields, bd),
+            allow_redirects=False,
+        )
+        preview = response_preview(resp)
+        self.log(f"{step} 响应: {preview}")
+        failure = find_action_failure(resp, stuck_on=stuck_on)
+        if failure:
+            raise RuntimeError(f"{step} 失败，Cursor 未接受本次提交: {failure}")
+        return resp
+
     def step1_get_session(self):
         nonce = str(uuid.uuid4())
         state = {"returnTo": "https://cursor.com/dashboard", "nonce": nonce}
@@ -72,27 +178,37 @@ class CursorRegister:
         return state_encoded, state_cookie_name
 
     def step2_submit_email(self, email, state_encoded):
-        bd = _boundary()
         referer = f"{AUTH}/sign-up?state={state_encoded}"
-        body = _multipart({"1_state": state_encoded, "email": email}, bd)
-        self.s.post(f"{AUTH}/sign-up",
-                    headers=self._base_headers(ACTION_SUBMIT_EMAIL, referer, boundary=bd),
-                    data=body, allow_redirects=False)
+        self._post_action(
+            ACTION_SUBMIT_EMAIL,
+            referer,
+            {"1_state": state_encoded, "email": email},
+            step="Step2 提交邮箱",
+            stuck_on=("/sign-in",),
+        )
 
     def step3_submit_password(self, password, email, state_encoded, captcha_solver=None):
+        referer = f"{AUTH}/sign-up?state={state_encoded}"
         captcha_token = ""
         if captcha_solver:
             self.log("获取 Turnstile token...")
-            captcha_token = captcha_solver.solve_turnstile(AUTH, TURNSTILE_SITEKEY)
-        bd = _boundary()
-        referer = f"{AUTH}/sign-up?state={state_encoded}"
-        body = _multipart({
-            "1_state": state_encoded, "email": email,
-            "password": password, "captchaToken": captcha_token,
-        }, bd)
-        self.s.post(f"{AUTH}/sign-up",
-                    headers=self._base_headers(ACTION_SUBMIT_PASSWORD, referer, boundary=bd),
-                    data=body, allow_redirects=False)
+            # token 跟页面 URL 绑定，要用实际报名页，不能只用站点根路径
+            captcha_token = str(captcha_solver.solve_turnstile(referer, TURNSTILE_SITEKEY) or "").strip()
+            if not captcha_token:
+                raise RuntimeError("Turnstile token 为空，无法提交密码，Cursor 不会发 OTP")
+            self.log(f"Turnstile token 已获取 ({len(captcha_token)} 字符)")
+        self._post_action(
+            ACTION_SUBMIT_PASSWORD,
+            referer,
+            {
+                "1_state": state_encoded,
+                "email": email,
+                "password": password,
+                "captchaToken": captcha_token,
+            },
+            step="Step3 提交密码",
+            stuck_on=("/sign-up/password",),
+        )
 
     def step4_submit_otp(self, otp, email, state_encoded):
         bd = _boundary()
