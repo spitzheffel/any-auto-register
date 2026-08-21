@@ -343,7 +343,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
             {"key": "herosms_auto_country_min_stock", "label": "自动选国最低库存", "placeholder": "20"},
             {"key": "herosms_auto_country_max_price", "label": "自动选国最高价格", "placeholder": "0 (不限)"},
             {"key": "register_phone_extra_max", "label": "号码复用额外上限", "placeholder": "3"},
-            {"key": "register_reuse_phone_to_max", "label": "复用号码至最大", "type": "toggle"},
+            {"key": "register_reuse_phone_to_max", "label": "复用号码至最大", "type": "toggle", "hint": "默认关闭：ChatGPT 风控不允许同一号码短时间内绑定多个账号，复用会白耗号码的 20 分钟有效期"},
         ],
     },
     {
@@ -378,7 +378,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
             {"key": "smsbower_max_price", "label": "最大价格 (可选)", "placeholder": "-1"},
             {"key": "smsbower_auto_country", "label": "自动选择最优国家", "type": "toggle", "hint": "启用后忽略默认国家，自动选择价格最低且库存充足的国家"},
             {"key": "register_phone_extra_max", "label": "号码复用额外上限", "placeholder": "3"},
-            {"key": "register_reuse_phone_to_max", "label": "复用号码至最大", "type": "toggle"},
+            {"key": "register_reuse_phone_to_max", "label": "复用号码至最大", "type": "toggle", "hint": "默认关闭：ChatGPT 风控不允许同一号码短时间内绑定多个账号，复用会白耗号码的 20 分钟有效期"},
         ],
     },
     # ── proxy ────────────────────────────────────────────────────────

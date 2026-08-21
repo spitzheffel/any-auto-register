@@ -1187,7 +1187,9 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
             default_country=str(config.get("sms_country") or config.get("herosms_country") or config.get("herosms_default_country") or HERO_SMS_DEFAULT_COUNTRY),
             max_price=_safe_float(config.get("herosms_max_price"), -1),
             proxy=str(config.get("sms_proxy") or config.get("proxy") or "") or None,
-            reuse_phone_to_max=_safe_bool(config.get("register_reuse_phone_to_max"), True),
+            # 默认关闭：OpenAI 风控不允许同号短时间内绑多个账号，而号码只活 20 分钟，
+            # 复用只会把窗口耗在注定被拒的号上
+            reuse_phone_to_max=_safe_bool(config.get("register_reuse_phone_to_max"), False),
             phone_success_max=max(0, _safe_int(config.get("register_phone_extra_max") or config.get("register_phone_success_max"), 3)),
         )
     if provider_key in ("smsbower", "smsbower_api"):
@@ -1200,7 +1202,7 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
             default_country=str(config.get("sms_country") or config.get("smsbower_country") or config.get("smsbower_default_country") or HERO_SMS_DEFAULT_COUNTRY),
             max_price=_safe_float(config.get("smsbower_max_price"), -1),
             proxy=str(config.get("sms_proxy") or config.get("proxy") or "") or None,
-            reuse_phone_to_max=_safe_bool(config.get("register_reuse_phone_to_max"), True),
+            reuse_phone_to_max=_safe_bool(config.get("register_reuse_phone_to_max"), False),
             phone_success_max=max(0, _safe_int(config.get("register_phone_extra_max") or config.get("register_phone_success_max"), 3)),
         )
     raise RuntimeError(f"未知的接码服务: {provider_key}")

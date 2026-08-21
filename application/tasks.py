@@ -731,7 +731,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         str(sms_settings.get("herosms_api_key") or "").strip()
     )
     hero_extra_max = max(_int_config(sms_settings.get("register_phone_extra_max"), 3), 0) if herosms_enabled else 0
-    hero_reuse_to_max = _bool_config(sms_settings.get("register_reuse_phone_to_max"), True) if herosms_enabled else False
+    hero_reuse_to_max = _bool_config(sms_settings.get("register_reuse_phone_to_max"), False) if herosms_enabled else False
     target_success = count
     max_success = count + hero_extra_max if herosms_enabled and hero_reuse_to_max else count
     progress_total = max_success if herosms_enabled else count
