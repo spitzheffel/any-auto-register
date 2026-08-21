@@ -1,6 +1,7 @@
 """自建 Mail 脚本接口（/api/v1/keys）邮箱渠道。"""
 from __future__ import annotations
 
+import logging
 import re
 import time
 import requests
@@ -9,7 +10,11 @@ from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification
 
 SCRIPT_API_SUFFIX = "/api/v1/keys"
 DEFAULT_GROUP = "register-pool"
+# 实测列信要 10~13 秒（远端回源 Graph），15 秒会卡在超时边缘
+DEFAULT_TIMEOUT = 40
 _CODE_RE = re.compile(r"(?<!#)(?<!\d)(\d{6})(?!\d)")
+
+logger = logging.getLogger(__name__)
 
 
 def _script_api_root(base_url: str) -> str:
@@ -64,7 +69,7 @@ class MailScriptMailbox(BaseMailbox):
             url,
             headers=self._headers(),
             proxies=self.proxy,
-            timeout=kwargs.pop("timeout", 15),
+            timeout=kwargs.pop("timeout", DEFAULT_TIMEOUT),
             **kwargs,
         )
         body: dict = {}
@@ -160,10 +165,17 @@ class MailScriptMailbox(BaseMailbox):
         )
 
     def get_current_ids(self, account: MailboxAccount) -> set:
-        try:
-            return {str(msg.get("id") or "") for msg in self._list_messages(account) if msg.get("id")}
-        except Exception:
-            return set()
+        # 快照失败会退化成空集，让"已消费邮件"过滤失效，第二次要码就可能读回上一封，
+        # 所以这里多试一次再放弃。
+        for attempt in range(2):
+            try:
+                return {str(msg.get("id") or "") for msg in self._list_messages(account) if msg.get("id")}
+            except Exception as exc:
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                logger.warning("Mail 脚本接口快照失败，已消费邮件过滤将退化: %s", exc)
+        return set()
 
     def wait_for_code(
         self,
