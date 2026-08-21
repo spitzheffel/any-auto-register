@@ -30,9 +30,19 @@ class BaseSmsProvider(ABC):
 
     auto_report_success_on_code = True
 
+    def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+        """把系统平台名解析为供应商原生服务码；显式 service 优先。"""
+        return str(service or platform or "").strip().lower()
+
     @abstractmethod
-    def get_number(self, *, service: str, country: str = "") -> SmsActivation:
-        """Rent a phone number for the given service."""
+    def get_number(
+        self,
+        *,
+        platform: str = "",
+        service: str = "",
+        country: str = "",
+    ) -> SmsActivation:
+        """按系统平台租用号码；service 可显式覆盖供应商原生服务码。"""
         ...
 
     @abstractmethod
@@ -133,8 +143,21 @@ class SmsActivateProvider(BaseSmsProvider):
             return float(result.split(":")[1])
         raise RuntimeError(f"SMS-Activate getBalance failed: {result}")
 
-    def get_number(self, *, service: str, country: str = "") -> SmsActivation:
-        service_code = SMS_ACTIVATE_SERVICES.get(service, SMS_ACTIVATE_SERVICES["default"])
+    def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+        explicit = str(service or "").strip().lower()
+        if explicit:
+            return explicit
+        platform_name = str(platform or "").strip().lower()
+        return SMS_ACTIVATE_SERVICES.get(platform_name, SMS_ACTIVATE_SERVICES["default"])
+
+    def get_number(
+        self,
+        *,
+        platform: str = "",
+        service: str = "",
+        country: str = "",
+    ) -> SmsActivation:
+        service_code = self.resolve_service_code(platform=platform, service=service)
         country_id = _resolve_sms_activate_country_id(country, self.default_country)
 
         result = self._request("getNumber", service=service_code, country=country_id)
@@ -185,12 +208,22 @@ class SmsActivateProvider(BaseSmsProvider):
 # HeroSMS implementation (https://hero-sms.com/stubs/handler_api.php)
 # ---------------------------------------------------------------------------
 
-HERO_SMS_DEFAULT_SERVICE = "dr"
+HERO_SMS_SERVICES = {
+    "chatgpt": "dr",
+    "openai": "dr",
+    "cursor": "ot",
+}
+HERO_SMS_DEFAULT_SERVICE = "ot"
 HERO_SMS_DEFAULT_COUNTRY = "187"
 HERO_SMS_PHONE_LIFETIME = 20 * 60
 _HERO_SMS_CACHE_LOCK = threading.Lock()
 _HERO_SMS_VERIFY_LOCK = threading.RLock()
 _HERO_SMS_CACHE: dict | None = None
+
+# 取号失败的国家在一段时间内不再被"最优国家"选中，避免同一任务反复踩同一个坑
+HERO_SMS_COUNTRY_BLACKLIST_TTL = 10 * 60
+_HERO_SMS_COUNTRY_BLACKLIST: dict[tuple[str, str, str], float] = {}
+_HERO_SMS_COUNTRY_BLACKLIST_LOCK = threading.Lock()
 
 
 def _project_data_dir() -> Path:
@@ -329,6 +362,7 @@ class HeroSmsProvider(BaseSmsProvider):
     """HeroSMS provider with resend, SMS event dedupe, and short-lived phone reuse."""
 
     BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
+    PROVIDER_LABEL = "HeroSMS"
     auto_report_success_on_code = False
 
     def __init__(
@@ -359,8 +393,25 @@ class HeroSmsProvider(BaseSmsProvider):
         if needs_key:
             payload["api_key"] = self.api_key
         resp = requests.get(self.BASE_URL, params=payload, timeout=timeout, proxies=self.proxies)
-        resp.raise_for_status()
+        self._raise_for_status(resp, action=str(params.get("action") or "unknown"))
         return resp
+
+    def _raise_for_status(self, resp: requests.Response, *, action: str) -> None:
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError:
+            raise RuntimeError(
+                f"{self.PROVIDER_LABEL} 请求失败: HTTP {resp.status_code} (action={action})"
+            ) from None
+
+    def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+        explicit = str(service or "").strip().lower()
+        if explicit:
+            return explicit
+        platform_name = str(platform or "").strip().lower()
+        if platform_name in HERO_SMS_SERVICES:
+            return HERO_SMS_SERVICES[platform_name]
+        return str(self.default_service or HERO_SMS_DEFAULT_SERVICE).strip().lower() or HERO_SMS_DEFAULT_SERVICE
 
     def get_balance(self) -> float:
         text = self._request({"action": "getBalance"}).text.strip()
@@ -542,6 +593,8 @@ class HeroSmsProvider(BaseSmsProvider):
             "52",   # Thailand (已验证走SMS)
         }
 
+        service_code = str(service or self.default_service or "")
+
         try:
             rows = self.get_top_countries(service=service)
         except Exception as exc:
@@ -551,32 +604,74 @@ class HeroSmsProvider(BaseSmsProvider):
         if not rows:
             return None
 
-        for row in rows:
+        def _candidate(row: dict) -> str:
             country_id = str(row.get("country") or "")
             if country_id not in ALLOWED_COUNTRIES:
-                continue
-            price = row.get("price") or 0
-            count = row.get("count") or 0
-            if count < min_stock:
-                continue
-            if max_price > 0 and price > max_price:
-                continue
+                return ""
+            # 刚刚取号失败过的国家先跳过，别在同一个任务里反复重试
+            if self._is_country_blacklisted(service_code, country_id):
+                return ""
+            if max_price > 0 and (row.get("price") or 0) > max_price:
+                return ""
             return country_id
+
+        for row in rows:
+            country_id = _candidate(row)
+            if country_id and (row.get("count") or 0) >= min_stock:
+                return country_id
 
         # 如果没有满足 min_stock 的，放宽到 count > 0
         for row in rows:
-            country_id = str(row.get("country") or "")
-            if country_id not in ALLOWED_COUNTRIES:
-                continue
-            price = row.get("price") or 0
-            count = row.get("count") or 0
-            if count <= 0:
-                continue
-            if max_price > 0 and price > max_price:
-                continue
-            return country_id
+            country_id = _candidate(row)
+            if country_id and (row.get("count") or 0) > 0:
+                return country_id
 
         return None
+
+    def _blacklist_key(self, service: str, country: str) -> tuple[str, str, str]:
+        return (_hash_secret(self.api_key), str(service), str(country))
+
+    def _blacklist_country(self, service: str, country: str) -> None:
+        if not country:
+            return
+        with _HERO_SMS_COUNTRY_BLACKLIST_LOCK:
+            _HERO_SMS_COUNTRY_BLACKLIST[self._blacklist_key(service, country)] = (
+                time.time() + HERO_SMS_COUNTRY_BLACKLIST_TTL
+            )
+
+    def _is_country_blacklisted(self, service: str, country: str) -> bool:
+        key = self._blacklist_key(service, country)
+        with _HERO_SMS_COUNTRY_BLACKLIST_LOCK:
+            expires_at = _HERO_SMS_COUNTRY_BLACKLIST.get(key)
+            if expires_at is None:
+                return False
+            if expires_at <= time.time():
+                _HERO_SMS_COUNTRY_BLACKLIST.pop(key, None)
+                return False
+            return True
+
+    def peek_reusable_country(self, *, platform: str = "", service: str = "") -> str:
+        """返回当前已持有、且可继续复用的号码所在国家（没有则空串）。
+
+        供调用方在挑选国家之前判断：已经握着可复用号码时，再去查"最优国家"
+        既浪费时间，还会因为国家不匹配而错过缓存。
+        """
+        if not self.reuse_phone_to_max:
+            return ""
+        service_code = self.resolve_service_code(platform=platform, service=service)
+        with _HERO_SMS_CACHE_LOCK:
+            cache = _HERO_SMS_CACHE
+            if not cache or cache.get("reuse_stopped"):
+                return ""
+            if str(cache.get("api_key_hash") or "") != _hash_secret(self.api_key):
+                return ""
+            if str(cache.get("service") or "") != str(service_code):
+                return ""
+            if time.time() - float(cache.get("acquired_at") or 0) >= HERO_SMS_PHONE_LIFETIME:
+                return ""
+            if self.phone_success_max > 0 and int(cache.get("use_count") or 0) >= self.phone_success_max:
+                return ""
+            return str(cache.get("country") or "")
 
     def _cache_identity(self, service: str, country: str) -> dict:
         return {
@@ -722,8 +817,14 @@ class HeroSmsProvider(BaseSmsProvider):
             return f"+{country_phone_code}{raw}"
         return f"+{raw}"
 
-    def get_number(self, *, service: str, country: str = "") -> SmsActivation:
-        service_code = str(self.default_service or service or HERO_SMS_DEFAULT_SERVICE).strip()
+    def get_number(
+        self,
+        *,
+        platform: str = "",
+        service: str = "",
+        country: str = "",
+    ) -> SmsActivation:
+        service_code = self.resolve_service_code(platform=platform, service=service)
         country_id = str(country or self.default_country or HERO_SMS_DEFAULT_COUNTRY).strip()
         with _HERO_SMS_VERIFY_LOCK:
             with _HERO_SMS_CACHE_LOCK:
@@ -738,7 +839,11 @@ class HeroSmsProvider(BaseSmsProvider):
                     self.current_activation = activation
                     return activation
 
-                number_info = self._request_number_raw(service_code, country_id)
+                try:
+                    number_info = self._request_number_raw(service_code, country_id)
+                except Exception:
+                    self._blacklist_country(service_code, country_id)
+                    raise
                 activation_id = str(number_info.get("activationId") or "")
                 phone = self._format_phone(number_info)
                 if not activation_id or not phone.strip("+"):
@@ -1029,6 +1134,7 @@ class SmsBowerProvider(HeroSmsProvider):
     """SMSBower provider — API 兼容 HeroSMS，仅 base URL 不同。"""
 
     BASE_URL = "https://smsbower.page/stubs/handler_api.php"
+    PROVIDER_LABEL = "SMSBower"
 
     def _request(self, params: dict, *, needs_key: bool = True, timeout: int = 30) -> requests.Response:
         # SMSBower 所有接口都需要 api_key（包括 getServicesList、getCountries）
@@ -1036,7 +1142,7 @@ class SmsBowerProvider(HeroSmsProvider):
         if needs_key or self.api_key:
             payload["api_key"] = self.api_key
         resp = requests.get(self.BASE_URL, params=payload, timeout=timeout, proxies=self.proxies)
-        resp.raise_for_status()
+        self._raise_for_status(resp, action=str(params.get("action") or "unknown"))
         return resp
 
 
@@ -1048,7 +1154,7 @@ def is_herosms_phone_cache_alive(config: dict | None = None) -> tuple[bool, dict
         return False, {"alive": False}
     provider = HeroSmsProvider(
         api_key,
-        default_service=str(config.get("sms_service") or HERO_SMS_DEFAULT_SERVICE),
+        default_service=str(config.get("herosms_default_service") or HERO_SMS_DEFAULT_SERVICE),
         default_country=str(config.get("sms_country") or config.get("herosms_country") or HERO_SMS_DEFAULT_COUNTRY),
         phone_success_max=max(0, _safe_int(config.get("register_phone_success_max"), 3)),
     )
@@ -1077,7 +1183,7 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
             raise RuntimeError("HeroSMS 未配置 API Key")
         return HeroSmsProvider(
             api_key=api_key,
-            default_service=str(config.get("sms_service") or config.get("herosms_service") or config.get("herosms_default_service") or HERO_SMS_DEFAULT_SERVICE),
+            default_service=str(config.get("herosms_default_service") or HERO_SMS_DEFAULT_SERVICE),
             default_country=str(config.get("sms_country") or config.get("herosms_country") or config.get("herosms_default_country") or HERO_SMS_DEFAULT_COUNTRY),
             max_price=_safe_float(config.get("herosms_max_price"), -1),
             proxy=str(config.get("sms_proxy") or config.get("proxy") or "") or None,
@@ -1090,7 +1196,7 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
             raise RuntimeError("SMSBower 未配置 API Key")
         return SmsBowerProvider(
             api_key=api_key,
-            default_service=str(config.get("sms_service") or config.get("smsbower_service") or config.get("smsbower_default_service") or HERO_SMS_DEFAULT_SERVICE),
+            default_service=str(config.get("smsbower_default_service") or HERO_SMS_DEFAULT_SERVICE),
             default_country=str(config.get("sms_country") or config.get("smsbower_country") or config.get("smsbower_default_country") or HERO_SMS_DEFAULT_COUNTRY),
             max_price=_safe_float(config.get("smsbower_max_price"), -1),
             proxy=str(config.get("sms_proxy") or config.get("proxy") or "") or None,
@@ -1103,10 +1209,20 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
 class PhoneCallbackController:
     """Callable phone callback with optional lifecycle hooks for advanced providers."""
 
-    def __init__(self, provider_key: str, config: dict, *, service: str, country: str = "", log_fn=None):
+    def __init__(
+        self,
+        provider_key: str,
+        config: dict,
+        *,
+        platform: str = "",
+        service: str = "",
+        country: str = "",
+        log_fn=None,
+    ):
         self.provider_key = provider_key
         self.config = dict(config or {})
-        self.service = service
+        self.platform = str(platform or "").strip().lower()
+        self.service = str(service or "").strip().lower()
         self.country = country
         self.log = log_fn or logger.info
         self.provider: Optional[BaseSmsProvider] = None
@@ -1124,20 +1240,40 @@ class PhoneCallbackController:
     def __call__(self) -> str:
         provider = self._provider()
         if self.phase == "need_number":
-            if self.provider_key == "herosms" and not self._verify_lock_acquired:
+            if self.provider_key in {
+                "herosms",
+                "herosms_api",
+                "smsbower",
+                "smsbower_api",
+            } and not self._verify_lock_acquired:
                 _HERO_SMS_VERIFY_LOCK.acquire()
                 self._verify_lock_acquired = True
 
             # 智能国家选择：如果启用了 auto_select_country，自动查询最优国家
             effective_country = self.country
+            service_code = provider.resolve_service_code(
+                platform=self.platform,
+                service=self.service,
+            )
             auto_select = _safe_bool(self.config.get("herosms_auto_country") or self.config.get("smsbower_auto_country"), False)
-            if auto_select and isinstance(provider, HeroSmsProvider):
+
+            # 已经握着可复用号码时直接沿用它的国家：再查一次"最优国家"不但白等十几秒，
+            # 还会因为国家不匹配而错过复用缓存，白白多取一个号。
+            reusable_country = ""
+            if isinstance(provider, HeroSmsProvider):
+                reusable_country = provider.peek_reusable_country(
+                    platform=self.platform,
+                    service=self.service,
+                )
+            if reusable_country:
+                effective_country = reusable_country
+            elif auto_select and isinstance(provider, HeroSmsProvider):
                 self.log("正在查询最优国家（价格最低 + 库存充足）...")
                 try:
                     min_stock = _safe_int(self.config.get("herosms_auto_country_min_stock") or self.config.get("smsbower_auto_country_min_stock"), 20)
                     max_price_limit = _safe_float(self.config.get("herosms_auto_country_max_price") or self.config.get("smsbower_auto_country_max_price"), 0)
                     best = provider.get_best_country(
-                        service=self.service,
+                        service=service_code,
                         min_stock=min_stock,
                         max_price=max_price_limit,
                     )
@@ -1150,17 +1286,29 @@ class PhoneCallbackController:
                     self.log(f"智能国家选择失败({exc})，使用默认配置")
 
             country_label = effective_country or self.config.get("sms_country") or self.config.get("sms_activate_country") or "default"
-            self.log(f"已进入 add_phone，准备租用手机号: provider={self.provider_key} service={self.service} country={country_label}")
+            self.log(
+                "已进入 add_phone，准备租用手机号: "
+                f"provider={self.provider_key} platform={self.platform or 'unknown'} "
+                f"service_code={service_code or 'default'} country={country_label}"
+            )
             self.log(f"正在从 {self.provider_key} 获取手机号...")
             try:
-                self.activation = provider.get_number(service=self.service, country=effective_country)
+                self.activation = provider.get_number(
+                    platform=self.platform,
+                    service=self.service,
+                    country=effective_country,
+                )
             except Exception as first_exc:
                 # 如果是自动选择的国家失败了，回退到默认国家重试
                 fallback_country = self.country or self.config.get("sms_country") or self.config.get("herosms_country") or ""
                 if auto_select and effective_country != fallback_country and fallback_country:
                     self.log(f"自动选择的国家({effective_country})获取号码失败，回退到默认国家({fallback_country})...")
                     try:
-                        self.activation = provider.get_number(service=self.service, country=fallback_country)
+                        self.activation = provider.get_number(
+                            platform=self.platform,
+                            service=self.service,
+                            country=fallback_country,
+                        )
                     except Exception:
                         if self._verify_lock_acquired:
                             _HERO_SMS_VERIFY_LOCK.release()
@@ -1250,7 +1398,8 @@ def create_phone_callbacks(
     provider_key: str,
     config: dict,
     *,
-    service: str,
+    platform: str = "",
+    service: str = "",
     country: str = "",
     log_fn=None,
 ) -> tuple:
@@ -1258,6 +1407,7 @@ def create_phone_callbacks(
     controller = PhoneCallbackController(
         provider_key,
         config,
+        platform=platform,
         service=service,
         country=country,
         log_fn=log_fn,

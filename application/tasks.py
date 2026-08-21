@@ -719,7 +719,9 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     proxy = payload.get("proxy") or None
     extra = dict(payload.get("extra") or {})
     sms_provider_key, sms_settings = _resolve_sms_provider_for_task(extra)
-    herosms_enabled = sms_provider_key == "herosms" and bool(str(sms_settings.get("herosms_api_key") or "").strip())
+    herosms_enabled = sms_provider_key in ("herosms", "herosms_api") and bool(
+        str(sms_settings.get("herosms_api_key") or "").strip()
+    )
     hero_extra_max = max(_int_config(sms_settings.get("register_phone_extra_max"), 3), 0) if herosms_enabled else 0
     hero_reuse_to_max = _bool_config(sms_settings.get("register_reuse_phone_to_max"), True) if herosms_enabled else False
     target_success = count
@@ -773,7 +775,11 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         platform = _build_platform_instance(platform_name, payload, logger, resolved_proxy=resolved_proxy, shared_mailbox=shared_mailbox)
         mailbox_notified = False
         try:
-            logger.log(f"开始注册第 {index + 1}/{count} 个账号")
+            if herosms_enabled:
+                # 号码可复用时会超发尝试，用 "第 N 次尝试" 而不是 "第 N/count 个账号"
+                logger.log(f"开始第 {index + 1} 次注册尝试 (成功目标 {target_success}，上限 {max_success})")
+            else:
+                logger.log(f"开始注册第 {index + 1}/{count} 个账号")
             if resolved_proxy:
                 logger.log(f"使用代理: {resolved_proxy}")
             account = platform.register(email=email, password=password)
@@ -818,6 +824,9 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         futures: dict[Any, int] = {}
         max_attempts = max(count if not herosms_enabled else max_success * 3, 1)
 
+        # 该判定会在调度循环里被重复求值，用签名去重避免同一状态刷屏
+        hero_reuse_logged: set[tuple[str, int]] = set()
+
         def _hero_phone_alive() -> bool:
             if not (herosms_enabled and hero_reuse_to_max):
                 return False
@@ -825,12 +834,16 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                 from core.base_sms import is_herosms_phone_cache_alive
                 alive, info = is_herosms_phone_cache_alive(sms_settings)
                 if alive:
-                    logger.log(
-                        "HeroSMS 号码仍可复用: "
-                        f"{str(info.get('phone_number') or '')[:5]}**** "
-                        f"剩余 {int(info.get('remaining_seconds') or 0)} 秒，"
-                        f"已成功 {int(info.get('use_count') or 0)} 次"
-                    )
+                    phone = str(info.get("phone_number") or "")
+                    use_count = int(info.get("use_count") or 0)
+                    if (phone, use_count) not in hero_reuse_logged:
+                        hero_reuse_logged.add((phone, use_count))
+                        logger.log(
+                            "HeroSMS 号码仍可复用: "
+                            f"{phone[:5]}**** "
+                            f"剩余 {int(info.get('remaining_seconds') or 0)} 秒，"
+                            f"已成功 {use_count} 次"
+                        )
                 return bool(alive)
             except Exception:
                 return False

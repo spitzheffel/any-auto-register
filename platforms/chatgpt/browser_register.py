@@ -2030,6 +2030,46 @@ def _mask_phone_number(phone_number: str) -> str:
     return f"{text[:4]}****{text[-2:]}"
 
 
+class PhoneRejectedError(RuntimeError):
+    """目标站点拒收当前手机号，重试同一号码没有意义，必须换号。"""
+
+
+# 号码级拒绝：OpenAI 明确拒绝这个号码本身（已被占用、近期用过、运营商不支持等）
+PHONE_REJECTED_PATTERNS = (
+    "recently used",
+    "already in use",
+    "already been used",
+    "phone_number_in_use",
+    "another account",
+    "different phone",
+    "not supported",
+    "unsupported",
+    "blocked",
+)
+
+
+def _is_phone_rejected_error(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if any(pattern in lowered for pattern in PHONE_REJECTED_PATTERNS):
+        return True
+    # "invalid phone number" 之类：必须同时提到号码，避免把验证码错误误判成号码问题
+    if "phone" not in lowered and "number" not in lowered:
+        return False
+    return any(keyword in lowered for keyword in ("invalid", "not valid", "cannot", "can't", "unable"))
+
+
+def _reset_phone_callback_for_retry(phone_callback) -> None:
+    """作废当前号码并把 phone_callback 复位，使下一轮重新租号。"""
+    if hasattr(phone_callback, "cleanup"):
+        phone_callback.cleanup()
+    if hasattr(phone_callback, "phase"):
+        phone_callback.phase = "need_number"
+        phone_callback.activation = None
+        phone_callback.completed = False
+
+
 def _is_invalid_phone_otp_response(result: dict) -> bool:
     status = int((result or {}).get("status") or 0)
     if status != 400:
@@ -2084,6 +2124,10 @@ def _handle_add_phone_challenge(
                 log=log, resume_url=resume_url,
             )
             return result
+        except PhoneRejectedError as exc:
+            last_error = exc
+            log(f"⚠️ 号码被目标站点拒绝，准备换号重试: {str(exc)[:120]}")
+            _reset_phone_callback_for_retry(phone_callback)
         except RuntimeError as exc:
             last_error = exc
             error_msg = str(exc)
@@ -2097,14 +2141,7 @@ def _handle_add_phone_challenge(
             if not should_retry:
                 raise
             log(f"⚠️ 验证码超时未收到，准备换号重试...")
-            # 取消当前号码
-            if hasattr(phone_callback, "cleanup"):
-                phone_callback.cleanup()
-            # 重置 phone_callback 状态为 need_number
-            if hasattr(phone_callback, "phase"):
-                phone_callback.phase = "need_number"
-                phone_callback.activation = None
-                phone_callback.completed = False
+            _reset_phone_callback_for_retry(phone_callback)
 
     raise last_error or RuntimeError("短信验证失败: 多次换号均未收到验证码")
 
@@ -2272,6 +2309,8 @@ def _do_add_phone_attempt(
     if error_text:
         if hasattr(phone_callback, "mark_send_failed"):
             phone_callback.mark_send_failed(error_text)
+        if _is_phone_rejected_error(error_text):
+            raise PhoneRejectedError(f"手机号被拒绝: {error_text[:200]}")
         raise RuntimeError(f"手机号提交失败: {error_text[:200]}")
 
     if hasattr(phone_callback, "mark_send_succeeded"):
@@ -2314,8 +2353,16 @@ def _do_add_phone_attempt(
                 return _extract_flow_state(None, page.url)
             return state
 
-        # 检查是否是无效验证码
         page_error = _extract_auth_error_text(page)
+
+        # 号码级拒绝要先判：这种情况下重发短信毫无意义，必须作废号码换新号
+        if _is_phone_rejected_error(page_error):
+            log(f"号码被 OpenAI 拒绝: {page_error[:120]}")
+            if hasattr(phone_callback, "mark_send_failed"):
+                phone_callback.mark_send_failed(page_error)
+            raise PhoneRejectedError(f"手机号被拒绝: {page_error[:200]}")
+
+        # 检查是否是无效验证码
         if page_error and any(kw in page_error.lower() for kw in ("invalid", "incorrect", "wrong", "expired")):
             log(f"短信验证码被判定无效: {page_error[:100]}，继续等待下一条...")
             if hasattr(phone_callback, "mark_code_failed"):

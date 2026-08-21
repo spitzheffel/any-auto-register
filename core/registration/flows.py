@@ -64,7 +64,10 @@ class BrowserRegistrationFlow:
                 success_label=self.adapter.link_spec.success_label,
                 preview_chars=self.adapter.link_spec.preview_chars,
             )
-        artifacts.phone_callback, artifacts.phone_cleanup = build_phone_callbacks(ctx, service=ctx.platform_name)
+        artifacts.phone_callback, artifacts.phone_cleanup = build_phone_callbacks(
+            ctx,
+            platform=ctx.platform_name,
+        )
 
         try:
             worker = self.adapter.browser_worker_builder(ctx, artifacts) if self.adapter.browser_worker_builder else None

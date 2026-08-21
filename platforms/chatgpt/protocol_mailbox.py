@@ -12,6 +12,7 @@ class _MailboxEmailService:
         self._mailbox = mailbox
         self._mailbox_account = mailbox_account
         self._acct = None
+        self._seen_ids: set = set()
 
     def create_email(self, config=None):
         self._acct = self._mailbox_account
@@ -22,8 +23,21 @@ class _MailboxEmailService:
         }
 
     def get_verification_code(self, email=None, email_id=None, timeout=120, pattern=None, otp_sent_at=None):
+        # 注册流程会多次要码，必须把已消费的邮件排除掉，否则第二次会拿到上一封的旧验证码。
         acct = self._acct or self._mailbox_account
-        return self._mailbox.wait_for_code(acct, keyword="", timeout=timeout, code_pattern=pattern)
+        code = self._mailbox.wait_for_code(
+            acct,
+            keyword="",
+            timeout=timeout,
+            before_ids=set(self._seen_ids),
+            code_pattern=pattern,
+        )
+        if code:
+            try:
+                self._seen_ids.update(self._mailbox.get_current_ids(acct) or set())
+            except Exception:
+                pass
+        return code
 
     def update_status(self, success, error=None):
         return None

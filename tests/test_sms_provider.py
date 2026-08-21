@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 from core.base_sms import (
+    HERO_SMS_SERVICES,
     HeroSmsProvider,
     SmsActivation,
     SmsActivateProvider,
@@ -23,6 +24,32 @@ class TestSmsActivateServiceMapping:
 
     def test_default_exists(self):
         assert "default" in SMS_ACTIVATE_SERVICES
+
+    def test_provider_resolves_platform_and_native_override(self):
+        provider = SmsActivateProvider("test")
+        assert provider.resolve_service_code(platform="chatgpt") == "dr"
+        assert provider.resolve_service_code(platform="cursor") == "ot"
+        assert provider.resolve_service_code(platform="unknown") == "ot"
+        assert provider.resolve_service_code(platform="chatgpt", service="go") == "go"
+
+
+class TestHeroSmsServiceMapping:
+    def test_known_platforms_and_default(self):
+        provider = HeroSmsProvider("test")
+        assert HERO_SMS_SERVICES["chatgpt"] == "dr"
+        assert provider.resolve_service_code(platform="chatgpt") == "dr"
+        assert provider.resolve_service_code(platform="cursor") == "ot"
+        assert provider.resolve_service_code(platform="unknown") == "ot"
+
+    def test_explicit_service_overrides_platform(self):
+        provider = HeroSmsProvider("test")
+        assert provider.resolve_service_code(platform="chatgpt", service="go") == "go"
+
+    def test_configured_fallback_does_not_override_known_platform(self):
+        provider = HeroSmsProvider("test", default_service="full")
+        assert provider.resolve_service_code(platform="chatgpt") == "dr"
+        assert provider.resolve_service_code(platform="cursor") == "ot"
+        assert provider.resolve_service_code(platform="unknown") == "full"
 
 
 class TestSmsActivateCountryMapping:
@@ -53,7 +80,7 @@ class TestCreateSmsProvider:
         provider = create_sms_provider("herosms", {"herosms_api_key": "hero123"})
         assert isinstance(provider, HeroSmsProvider)
         assert provider.api_key == "hero123"
-        assert provider.default_service == "dr"
+        assert provider.default_service == "ot"
         assert provider.default_country == "187"
 
     def test_herosms_reuse_flag_parses_string_false(self):
@@ -82,18 +109,55 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "sms_activate",
             {"sms_activate_api_key": "test"},
-            service="cursor",
+            platform="cursor",
         )
         assert callable(callback)
         assert callable(cleanup)
+
+    def test_auto_country_uses_resolved_provider_service_code(self, monkeypatch):
+        events = []
+        logs = []
+        provider = HeroSmsProvider("hero123")
+
+        def fake_best_country(*, service=None, min_stock=20, max_price=0):
+            events.append(("best_country", service))
+            return "52"
+
+        def fake_get_number(*, platform="", service="", country=""):
+            events.append(("get_number", platform, service, country))
+            return SmsActivation(activation_id="act_map", phone_number="+66123456789")
+
+        monkeypatch.setattr(provider, "get_best_country", fake_best_country)
+        monkeypatch.setattr(provider, "get_number", fake_get_number)
+        monkeypatch.setattr(provider, "cancel", lambda activation_id: True)
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {
+                "herosms_api_key": "hero123",
+                "herosms_auto_country": "true",
+            },
+            platform="chatgpt",
+            log_fn=logs.append,
+        )
+
+        assert callback() == "+66123456789"
+        cleanup()
+        assert ("best_country", "dr") in events
+        assert ("get_number", "chatgpt", "", "52") in events
+        assert any("platform=chatgpt service_code=dr" in item for item in logs)
 
     def test_provider_is_created_lazily_and_cleanup_cancels_pending_activation(self, monkeypatch):
         events = []
         logs = []
 
         class FakeProvider:
-            def get_number(self, *, service: str, country: str = ""):
-                events.append(("get_number", service, country))
+            def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+                return service or platform
+
+            def get_number(self, *, platform: str = "", service: str = "", country: str = ""):
+                events.append(("get_number", platform, service, country))
                 return SmsActivation(activation_id="act_1", phone_number="+15551234567")
 
             def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
@@ -113,7 +177,7 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "sms_activate",
             {"sms_activate_api_key": "test"},
-            service="chatgpt",
+            platform="chatgpt",
             country="us",
             log_fn=logs.append,
         )
@@ -121,7 +185,7 @@ class TestCreatePhoneCallbacks:
         assert events == []
         assert callback() == "+15551234567"
         cleanup()
-        assert ("get_number", "chatgpt", "us") in events
+        assert ("get_number", "chatgpt", "", "us") in events
         assert ("cancel", "act_1") in events
         assert any("准备租用手机号" in item for item in logs)
         assert any("已成功租到号码" in item for item in logs)
@@ -132,8 +196,11 @@ class TestCreatePhoneCallbacks:
         logs = []
 
         class FakeProvider:
-            def get_number(self, *, service: str, country: str = ""):
-                events.append(("get_number", service, country))
+            def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+                return service or platform
+
+            def get_number(self, *, platform: str = "", service: str = "", country: str = ""):
+                events.append(("get_number", platform, service, country))
                 return SmsActivation(activation_id="act_2", phone_number="+15557654321")
 
             def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
@@ -153,7 +220,7 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "sms_activate",
             {"sms_activate_api_key": "test"},
-            service="chatgpt",
+            platform="chatgpt",
             log_fn=logs.append,
         )
 
@@ -171,8 +238,11 @@ class TestCreatePhoneCallbacks:
         class FakeProvider:
             auto_report_success_on_code = False
 
-            def get_number(self, *, service: str, country: str = ""):
-                events.append(("get_number", service, country))
+            def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+                return service or platform
+
+            def get_number(self, *, platform: str = "", service: str = "", country: str = ""):
+                events.append(("get_number", platform, service, country))
                 return SmsActivation(activation_id="act_deferred", phone_number="+15550001111")
 
             def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
@@ -192,7 +262,7 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "herosms",
             {"herosms_api_key": "test"},
-            service="cursor",
+            platform="cursor",
         )
 
         assert callback() == "+15550001111"
@@ -208,9 +278,12 @@ class TestCreatePhoneCallbacks:
             def __init__(self):
                 self.calls = 0
 
-            def get_number(self, *, service: str, country: str = ""):
+            def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+                return service or platform
+
+            def get_number(self, *, platform: str = "", service: str = "", country: str = ""):
                 self.calls += 1
-                events.append(("get_number", self.calls, service, country))
+                events.append(("get_number", self.calls, platform, service, country))
                 if self.calls == 1:
                     raise RuntimeError("temporary failure")
                 return SmsActivation(activation_id="act_retry", phone_number="+66123456789")
@@ -233,7 +306,7 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "sms_activate",
             {"sms_activate_api_key": "test"},
-            service="chatgpt",
+            platform="chatgpt",
             country="th",
         )
 
@@ -247,7 +320,10 @@ class TestCreatePhoneCallbacks:
 
     def test_herosms_number_fetch_failure_releases_verify_lock(self, monkeypatch):
         class FakeProvider:
-            def get_number(self, *, service: str, country: str = ""):
+            def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+                return service or platform
+
+            def get_number(self, *, platform: str = "", service: str = "", country: str = ""):
                 raise RuntimeError("temporary failure")
 
         monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: FakeProvider())
@@ -255,7 +331,7 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "herosms",
             {"herosms_api_key": "test"},
-            service="chatgpt",
+            platform="chatgpt",
         )
 
         with pytest.raises(RuntimeError, match="temporary failure"):
@@ -268,7 +344,10 @@ class TestCreatePhoneCallbacks:
         events = []
 
         class FakeProvider:
-            def get_number(self, *, service: str, country: str = ""):
+            def resolve_service_code(self, *, platform: str = "", service: str = "") -> str:
+                return service or platform
+
+            def get_number(self, *, platform: str = "", service: str = "", country: str = ""):
                 return SmsActivation(activation_id="act_sent", phone_number="+15551234567")
 
             def mark_send_succeeded(self, activation_id: str) -> None:
@@ -283,7 +362,7 @@ class TestCreatePhoneCallbacks:
         callback, cleanup = create_phone_callbacks(
             "herosms",
             {"herosms_api_key": "test"},
-            service="chatgpt",
+            platform="chatgpt",
         )
 
         assert callback() == "+15551234567"
@@ -305,13 +384,42 @@ class TestSmsActivateProviderCountryResolution:
         provider = SmsActivateProvider("test123", default_country="ru")
 
         with pytest.raises(RuntimeError, match="NO_NUMBERS|无可用号码"):
-            provider.get_number(service="chatgpt", country="52")
+            provider.get_number(platform="chatgpt", country="52")
 
         assert captured["action"] == "getNumber"
+        assert captured["params"]["service"] == "dr"
         assert captured["params"]["country"] == "52"
 
 
 class TestHeroSmsProvider:
+    def test_cursor_uses_ot_service_code(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", None)
+        calls = []
+
+        class FakeResp:
+            text = '{"activationId":"act_cursor","phoneNumber":"5551234","countryPhoneCode":"1"}'
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "activationId": "act_cursor",
+                    "phoneNumber": "5551234",
+                    "countryPhoneCode": "1",
+                }
+
+        def fake_get(url, params, timeout=30, proxies=None):
+            calls.append(params)
+            return FakeResp()
+
+        monkeypatch.setattr("core.base_sms.requests.get", fake_get)
+        provider = HeroSmsProvider("hero123")
+        provider.get_number(platform="cursor", country="187")
+
+        assert calls[0]["service"] == "ot"
+
     def test_get_number_uses_v2_json(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
         monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", None)
@@ -332,11 +440,13 @@ class TestHeroSmsProvider:
 
         monkeypatch.setattr("core.base_sms.requests.get", fake_get)
         provider = HeroSmsProvider("hero123")
-        activation = provider.get_number(service="chatgpt", country="187")
+        activation = provider.get_number(platform="chatgpt", country="187")
 
         assert activation.activation_id == "act_1"
         assert activation.phone_number == "+15551234"
-        assert calls[0]["action"] == "getNumberV2"
+        number_call = next(item for item in calls if item["action"] == "getNumberV2")
+        assert number_call["service"] == "dr"
+        assert sms_module._HERO_SMS_CACHE["service"] == "dr"
 
     def test_get_number_falls_back_to_v1_text(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
@@ -361,11 +471,35 @@ class TestHeroSmsProvider:
 
         monkeypatch.setattr("core.base_sms.requests.get", fake_get)
         provider = HeroSmsProvider("hero123")
-        activation = provider.get_number(service="chatgpt", country="187")
+        activation = provider.get_number(platform="chatgpt", country="187")
 
         assert activation.activation_id == "act_2"
         assert activation.phone_number == "+15557654321"
-        assert calls == ["getNumberV2", "getNumber"]
+        assert [item for item in calls if item != "getPrices"] == ["getNumberV2", "getNumber"]
+
+    def test_http_error_does_not_leak_api_key(self, monkeypatch):
+        secret = "hero-secret-key"
+
+        class FakeResp:
+            status_code = 404
+
+            def raise_for_status(self):
+                raise sms_module.requests.HTTPError(
+                    f"404 for https://hero-sms.com/?api_key={secret}"
+                )
+
+        monkeypatch.setattr(
+            "core.base_sms.requests.get",
+            lambda *args, **kwargs: FakeResp(),
+        )
+        provider = HeroSmsProvider(secret)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            provider._request({"action": "getNumberV2"})
+
+        assert secret not in str(exc_info.value)
+        assert "HTTP 404" in str(exc_info.value)
+        assert "getNumberV2" in str(exc_info.value)
 
     def test_get_code_skips_attempted_sms_event(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
@@ -454,6 +588,113 @@ class TestHeroSmsProvider:
 
         assert events == [("finish", "act_6")]
         assert sms_module._HERO_SMS_CACHE is None
+
+
+def _live_cache(api_key: str = "hero123", *, service: str = "dr", country: str = "187", **overrides) -> dict:
+    cache = {
+        "api_key_hash": sms_module._hash_secret(api_key),
+        "service": service,
+        "country": country,
+        "activation_id": "act_reuse",
+        "phone_number": "+447858792530",
+        "acquired_at": sms_module.time.time(),
+        "use_count": 1,
+        "used_codes": set(),
+        "attempted_sms_keys": set(),
+        "reuse_stopped": False,
+    }
+    cache.update(overrides)
+    return cache
+
+
+class TestHeroSmsPeekReusableCountry:
+    def test_returns_cached_country_for_same_service(self, monkeypatch):
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", _live_cache(country="16"))
+        provider = HeroSmsProvider("hero123")
+
+        assert provider.peek_reusable_country(platform="chatgpt") == "16"
+
+    def test_ignores_cache_of_a_different_service(self, monkeypatch):
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", _live_cache(service="ot"))
+        provider = HeroSmsProvider("hero123")
+
+        assert provider.peek_reusable_country(platform="chatgpt") == ""
+
+    def test_ignores_stopped_or_exhausted_cache(self, monkeypatch):
+        provider = HeroSmsProvider("hero123", phone_success_max=2)
+
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", _live_cache(reuse_stopped=True))
+        assert provider.peek_reusable_country(platform="chatgpt") == ""
+
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", _live_cache(use_count=2))
+        assert provider.peek_reusable_country(platform="chatgpt") == ""
+
+    def test_ignores_expired_cache(self, monkeypatch):
+        expired_at = sms_module.time.time() - sms_module.HERO_SMS_PHONE_LIFETIME - 1
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", _live_cache(acquired_at=expired_at))
+        provider = HeroSmsProvider("hero123")
+
+        assert provider.peek_reusable_country(platform="chatgpt") == ""
+
+    def test_returns_empty_when_reuse_disabled(self, monkeypatch):
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", _live_cache(country="16"))
+        provider = HeroSmsProvider("hero123", reuse_phone_to_max=False)
+
+        assert provider.peek_reusable_country(platform="chatgpt") == ""
+
+
+class TestHeroSmsCountryBlacklist:
+    @pytest.fixture(autouse=True)
+    def _clear_blacklist(self, monkeypatch):
+        monkeypatch.setattr(sms_module, "_HERO_SMS_COUNTRY_BLACKLIST", {})
+
+    def test_failed_country_is_skipped_by_best_country(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+        monkeypatch.setattr(
+            provider,
+            "get_top_countries",
+            lambda service=None: [{"country": "52", "price": 0.1, "count": 100}],
+        )
+
+        assert provider.get_best_country(service="dr") == "52"
+
+        provider._blacklist_country("dr", "52")
+        assert provider.get_best_country(service="dr") is None
+
+    def test_blacklist_is_scoped_to_service(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+        monkeypatch.setattr(
+            provider,
+            "get_top_countries",
+            lambda service=None: [{"country": "52", "price": 0.1, "count": 100}],
+        )
+        provider._blacklist_country("dr", "52")
+
+        assert provider.get_best_country(service="ot") == "52"
+
+    def test_blacklist_entry_expires(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+        provider._blacklist_country("dr", "52")
+        assert provider._is_country_blacklisted("dr", "52") is True
+
+        future = sms_module.time.time() + sms_module.HERO_SMS_COUNTRY_BLACKLIST_TTL + 1
+        monkeypatch.setattr(sms_module.time, "time", lambda: future)
+        assert provider._is_country_blacklisted("dr", "52") is False
+
+    def test_get_number_blacklists_country_on_failure(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", None)
+        provider = HeroSmsProvider("hero123")
+
+        def boom(service, country):
+            raise RuntimeError("NO_NUMBERS")
+
+        monkeypatch.setattr(provider, "_request_number_raw", boom)
+
+        with pytest.raises(RuntimeError, match="NO_NUMBERS"):
+            provider.get_number(platform="chatgpt", country="52")
+
+        assert provider._is_country_blacklisted("dr", "52") is True
 
 
 class TestSmsActivation:

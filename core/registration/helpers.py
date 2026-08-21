@@ -57,9 +57,13 @@ def build_otp_callback(
     if not mailbox or not mail_acct:
         return None
 
+    # 同一次注册可能多次要码（注册 + OAuth 登录）。before_ids 只是身份创建时的
+    # 一次性快照，如果不累积，第二次要码会重新扫到上一封验证邮件并返回旧验证码。
+    seen_ids: set = set(getattr(ctx.identity, "before_ids", None) or set())
+
     def otp_cb():
         ctx.log(wait_message)
-        kwargs = {"keyword": keyword, "before_ids": getattr(ctx.identity, "before_ids", set())}
+        kwargs = {"keyword": keyword, "before_ids": set(seen_ids)}
         if timeout is not None:
             kwargs["timeout"] = timeout
         if code_pattern:
@@ -67,12 +71,21 @@ def build_otp_callback(
         code = mailbox.wait_for_code(mail_acct, **kwargs)
         if code:
             ctx.log(f"{success_label}: {code}")
+            try:
+                seen_ids.update(mailbox.get_current_ids(mail_acct) or set())
+            except Exception:
+                pass
         return code
 
     return otp_cb
 
 
-def build_phone_callbacks(ctx: RegistrationContext, *, service: str | None = None):
+def build_phone_callbacks(
+    ctx: RegistrationContext,
+    *,
+    platform: str | None = None,
+    service: str | None = None,
+):
     from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
     from infrastructure.provider_settings_repository import ProviderSettingsRepository
 
@@ -126,22 +139,26 @@ def build_phone_callbacks(ctx: RegistrationContext, *, service: str | None = Non
         or merged.get("smsbower_default_country")
         or ""
     ).strip()
-    sms_service = str(
-        merged.get("sms_service")
-        or merged.get("herosms_service")
-        or merged.get("herosms_default_service")
-        or merged.get("smsbower_service")
-        or merged.get("smsbower_default_service")
-        or merged.get("sms_activate_service")
-        or merged.get("sms_activate_default_service")
-        or service
-        or ctx.platform_name
-    ).strip() or ctx.platform_name
-    ctx.log(f"[SMS] phone_callback 已就绪: provider={provider_key} 来源={source} service={sms_service} country={country or 'default'}")
+    platform_name = str(platform or ctx.platform_name or "").strip().lower()
+    explicit_service = str(
+        service
+        or extra.get("sms_service")
+        or extra.get("herosms_service")
+        or extra.get("smsbower_service")
+        or extra.get("sms_activate_service")
+        or ""
+    ).strip().lower()
+    ctx.log(
+        f"[SMS] phone_callback 已就绪: provider={provider_key}(来源={source}) "
+        f"platform={platform_name or 'unknown'} "
+        f"service_override={explicit_service or 'none'} "
+        f"默认country={country or 'default'}"
+    )
     return create_phone_callbacks(
         provider_key,
         merged,
-        service=sms_service,
+        platform=platform_name,
+        service=explicit_service,
         country=country,
         log_fn=ctx.log,
     )

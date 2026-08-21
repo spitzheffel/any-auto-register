@@ -38,7 +38,11 @@ def _provider_from_payload(payload: HeroSmsQueryRequest | None = None) -> HeroSm
     api_key = str(payload.api_key or saved.get("herosms_api_key") or "").strip()
     return HeroSmsProvider(
         api_key=api_key,
-        default_service=str(payload.service or saved.get("sms_service") or HERO_SMS_DEFAULT_SERVICE),
+        default_service=str(
+            payload.service
+            or saved.get("herosms_default_service")
+            or HERO_SMS_DEFAULT_SERVICE
+        ),
         default_country=str(payload.country or saved.get("sms_country") or HERO_SMS_DEFAULT_COUNTRY),
         max_price=_safe_float(saved.get("herosms_max_price"), -1),
         proxy=str(payload.proxy or saved.get("sms_proxy") or saved.get("proxy") or "") or None,
@@ -159,7 +163,11 @@ def _smsbower_from_payload(payload: HeroSmsQueryRequest | None = None) -> SmsBow
     api_key = str(payload.api_key or saved.get("smsbower_api_key") or "").strip()
     return SmsBowerProvider(
         api_key=api_key,
-        default_service=str(payload.service or saved.get("sms_service") or saved.get("smsbower_service") or HERO_SMS_DEFAULT_SERVICE),
+        default_service=str(
+            payload.service
+            or saved.get("smsbower_default_service")
+            or HERO_SMS_DEFAULT_SERVICE
+        ),
         default_country=str(payload.country or saved.get("sms_country") or saved.get("smsbower_country") or HERO_SMS_DEFAULT_COUNTRY),
         max_price=_safe_float(saved.get("smsbower_max_price"), -1),
         proxy=str(payload.proxy or saved.get("sms_proxy") or saved.get("proxy") or "") or None,

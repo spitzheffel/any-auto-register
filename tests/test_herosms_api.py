@@ -6,7 +6,7 @@ def test_config_options_include_herosms_provider(client):
     assert resp.status_code == 200
     data = resp.json()
     providers = data["sms_providers"]
-    hero = next(item for item in providers if item["value"] == "herosms")
+    hero = next(item for item in providers if item["value"] == "herosms_api")
     assert hero["label"] == "HeroSMS"
     assert any(field["key"] == "herosms_api_key" for field in hero["fields"])
 
