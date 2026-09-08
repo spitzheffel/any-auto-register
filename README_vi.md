@@ -323,46 +323,54 @@ npm run dev
 # Mở http://localhost:5173 — Vite proxy API về backend
 ```
 
-Entry duy nhất là `main:app`. Tất cả route backend nằm dưới `/api/*`. Xem [`docs/frontend-api-contract.md`](docs/frontend-api-contract.md) cho API contract.
+Entry duy nhất là `main:app`. Tất cả route backend nằm dưới `/api/*`.
 
 </details>
 
 <details>
 <summary><b>Thêm platform plugin</b></summary>
 
-Layout plugin:
+Layout plugin (`platforms/cursor/` là implementation tham khảo):
 
 ```
 platforms/myplatform/
-├── plugin.py
-├── registration/
-│   ├── module.py       # entry registration module
-│   ├── protocol.py     # protocol core
-│   ├── worker.py       # mailbox provider → protocol flow
-│   ├── browser.py      # browser registration (tùy chọn)
-│   └── oauth.py        # browser OAuth (tùy chọn)
-├── query.py            # khả năng query (tùy chọn)
-├── payment.py          # khả năng payment (tùy chọn)
-└── transfer.py         # khả năng import / export (tùy chọn)
+├── plugin.py            # subclass BasePlatform với @register: executors, identity modes, adapters
+├── steps.py             # browser path: Step flow (tùy chọn)
+├── obstacles.py         # browser path: xử lý Turnstile / full-page block (tùy chọn)
+├── dom.py               # browser path: selectors và DOM helpers (tùy chọn)
+├── core.py              # protocol path: HTTP client (tùy chọn)
+├── protocol_mailbox.py  # protocol path: registration worker (tùy chọn)
+└── drift.py             # các hằng số dễ thay đổi theo site (action ids / endpoints / selectors) cho script drift-check
 ```
 
 `plugin.py` tối thiểu:
 
 ```python
-from core.platform_plugin import ConfiguredPlatformPlugin
-from core.plugin_registry import register
+from core.base_platform import BasePlatform
+from core.registration import BrowserRegistrationAdapter
+from core.registry import register
 
 @register
-class MyPlatformPlugin(ConfiguredPlatformPlugin):
+class MyPlatform(BasePlatform):
     name = "myplatform"
     display_name = "My Platform"
-    version = "2.0.0"
-    query_class = "MyPlatformQuery"
-    payment_class = "MyPlatformPayment"
-    transfer_class = "MyPlatformTransfer"
+    supported_executors = ["headless", "headed"]
+    supported_identity_modes = ["mailbox"]
+
+    def build_browser_registration_adapter(self):
+        from platforms.myplatform.steps import build_flow
+        from platforms.myplatform.obstacles import build_obstacles
+
+        return BrowserRegistrationAdapter(
+            result_mapper=lambda ctx, result: ...,
+            step_flow_builder=build_flow,
+            obstacle_builder=build_obstacles,
+        )
 ```
 
-Hệ thống quét `platforms/*/plugin.py` khi khởi động và auto-load mọi thứ đăng ký qua `@register`. Để xem `registration/module.py` đầy đủ, tham khảo các platform có sẵn (`platforms/kiro/`, `platforms/chatgpt/`).
+Hệ thống quét `platforms/*/plugin.py` khi khởi động và auto-load mọi thứ đăng ký qua `@register`; executors / identity modes khai báo trên class được seed tự động vào bảng platform capability. Đăng ký qua browser do Step engine trong `core/registration/steps.py` điều khiển (retry, rewind, compensation, checkpoint, failure artifacts, human-in-the-loop đều nằm trong engine) — platform chỉ viết các step. Protocol path xem `platforms/cursor/core.py`.
+
+Quy ước và quy trình (scaffold platform từ session đã capture, kiểm tra site drift, triage lỗi) nằm trong bốn skill dưới `.agents/skills/` (`step-engine-conventions`, `platform-from-capture`, `platform-drift-check`, `failure-triage`). Yêu cầu channel được suy ra bằng `PlatformsService().describe_requirements(...)`, không viết tay.
 
 </details>
 

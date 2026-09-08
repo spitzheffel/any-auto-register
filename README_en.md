@@ -323,46 +323,54 @@ npm run dev
 # Open http://localhost:5173 — Vite proxies API requests to the backend
 ```
 
-The single entry point is `main:app`. All backend routes live under `/api/*`. See [`docs/frontend-api-contract.md`](docs/frontend-api-contract.md) for the API contract.
+The single entry point is `main:app`. All backend routes live under `/api/*`.
 
 </details>
 
 <details>
 <summary><b>Adding a platform plugin</b></summary>
 
-Plugin layout:
+Plugin layout (`platforms/cursor/` is the reference implementation):
 
 ```
 platforms/myplatform/
-├── plugin.py
-├── registration/
-│   ├── module.py       # registration module entry
-│   ├── protocol.py     # protocol core
-│   ├── worker.py       # mailbox provider → protocol flow
-│   ├── browser.py      # browser registration (optional)
-│   └── oauth.py        # browser OAuth (optional)
-├── query.py            # query capability (optional)
-├── payment.py          # payment capability (optional)
-└── transfer.py         # import / export capability (optional)
+├── plugin.py            # BasePlatform subclass decorated with @register: executors, identity modes, adapters
+├── steps.py             # browser path: the Step flow (optional)
+├── obstacles.py         # browser path: Turnstile / full-page-block obstacle handlers (optional)
+├── dom.py               # browser path: selectors and DOM helpers (optional)
+├── core.py              # protocol path: HTTP client (optional)
+├── protocol_mailbox.py  # protocol path: registration worker (optional)
+└── drift.py             # site-volatile constants (action ids / endpoints / selectors) for the drift-check script
 ```
 
 Minimal `plugin.py`:
 
 ```python
-from core.platform_plugin import ConfiguredPlatformPlugin
-from core.plugin_registry import register
+from core.base_platform import BasePlatform
+from core.registration import BrowserRegistrationAdapter
+from core.registry import register
 
 @register
-class MyPlatformPlugin(ConfiguredPlatformPlugin):
+class MyPlatform(BasePlatform):
     name = "myplatform"
     display_name = "My Platform"
-    version = "2.0.0"
-    query_class = "MyPlatformQuery"
-    payment_class = "MyPlatformPayment"
-    transfer_class = "MyPlatformTransfer"
+    supported_executors = ["headless", "headed"]
+    supported_identity_modes = ["mailbox"]
+
+    def build_browser_registration_adapter(self):
+        from platforms.myplatform.steps import build_flow
+        from platforms.myplatform.obstacles import build_obstacles
+
+        return BrowserRegistrationAdapter(
+            result_mapper=lambda ctx, result: ...,
+            step_flow_builder=build_flow,
+            obstacle_builder=build_obstacles,
+        )
 ```
 
-The system scans `platforms/*/plugin.py` at startup and auto-loads anything registered via `@register`. For a complete `registration/module.py` example, look at existing platforms (`platforms/kiro/`, `platforms/chatgpt/`).
+The system scans `platforms/*/plugin.py` at startup and auto-loads anything registered via `@register`; the executors / identity modes declared on the class are seeded into the platform capability table automatically. Browser registration is driven by the Step engine in `core/registration/steps.py` (retries, rewinds, compensation, checkpoints, failure artifacts and human-in-the-loop all live in the engine) — a platform only writes its steps. For the protocol path see `platforms/cursor/core.py`.
+
+Conventions plus the workflows for scaffolding a platform from a captured session, checking for site drift and triaging failures live in the four skills under `.agents/skills/` (`step-engine-conventions`, `platform-from-capture`, `platform-drift-check`, `failure-triage`). Channel requirements are derived with `PlatformsService().describe_requirements(...)` instead of being written by hand.
 
 </details>
 

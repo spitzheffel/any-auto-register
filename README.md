@@ -327,46 +327,54 @@ npm run dev
 # 访问 http://localhost:5173,API 由 Vite 代理转发到后端
 ```
 
-启动入口统一 `main:app`,后端接口统一 `/api/*`,前后端接口契约见 [docs/frontend-api-contract.md](docs/frontend-api-contract.md)。
+启动入口统一 `main:app`,后端接口统一 `/api/*`。
 
 </details>
 
 <details>
 <summary><b>新增平台插件</b></summary>
 
-平台插件目录结构:
+平台插件目录结构(以 `platforms/cursor/` 为参考实现):
 
 ```
 platforms/myplatform/
-├── plugin.py
-├── registration/
-│   ├── module.py       # 注册模块入口
-│   ├── protocol.py     # 协议核心
-│   ├── worker.py       # mailbox provider 到协议流程
-│   ├── browser.py      # 浏览器注册(按需)
-│   └── oauth.py        # 浏览器 OAuth(按需)
-├── query.py            # 查询能力(按需)
-├── payment.py          # 支付能力(按需)
-└── transfer.py         # 导入导出(按需)
+├── plugin.py            # @register 的 BasePlatform 子类,声明执行器 / 身份模式 / 适配器
+├── steps.py             # 浏览器路径:Step 流程(按需)
+├── obstacles.py         # 浏览器路径:Turnstile / 全页拦截等干扰处理器(按需)
+├── dom.py               # 浏览器路径:选择器与 DOM 辅助(按需)
+├── core.py              # 协议路径:HTTP 客户端(按需)
+├── protocol_mailbox.py  # 协议路径:注册 worker(按需)
+└── drift.py             # 站点会变的常量(action id / 端点 / 选择器),供漂移检查脚本对照
 ```
 
 最小实现 `plugin.py`:
 
 ```python
-from core.platform_plugin import ConfiguredPlatformPlugin
-from core.plugin_registry import register
+from core.base_platform import BasePlatform
+from core.registration import BrowserRegistrationAdapter
+from core.registry import register
 
 @register
-class MyPlatformPlugin(ConfiguredPlatformPlugin):
+class MyPlatform(BasePlatform):
     name = "myplatform"
     display_name = "My Platform"
-    version = "2.0.0"
-    query_class = "MyPlatformQuery"
-    payment_class = "MyPlatformPayment"
-    transfer_class = "MyPlatformTransfer"
+    supported_executors = ["headless", "headed"]
+    supported_identity_modes = ["mailbox"]
+
+    def build_browser_registration_adapter(self):
+        from platforms.myplatform.steps import build_flow
+        from platforms.myplatform.obstacles import build_obstacles
+
+        return BrowserRegistrationAdapter(
+            result_mapper=lambda ctx, result: ...,
+            step_flow_builder=build_flow,
+            obstacle_builder=build_obstacles,
+        )
 ```
 
-系统启动时扫描 `platforms/*/plugin.py` 自动加载 `@register` 注册的插件。完整的 `registration/module.py` 示例参考已有平台(`platforms/kiro/`、`platforms/chatgpt/`)。
+系统启动时扫描 `platforms/*/plugin.py` 自动加载 `@register` 注册的插件;类属性里的执行器 / 身份模式会自动种入平台能力表。浏览器路径的注册流程由 `core/registration/steps.py` 的 Step 引擎驱动(重试、回撤、补偿、检查点、失败现场、人工介入都在引擎里),平台只写步骤;协议路径见 `platforms/cursor/core.py`。
+
+约定、从抓包会话搭平台、站点漂移检查、失败排查的操作流程见 `.agents/skills/` 下的四个 skill(`step-engine-conventions`、`platform-from-capture`、`platform-drift-check`、`failure-triage`);渠道需求可用 `PlatformsService().describe_requirements(...)` 推导,不必手写。
 
 </details>
 

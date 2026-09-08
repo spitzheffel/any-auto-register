@@ -185,7 +185,6 @@ class TestPlaywrightExecutorEngine:
         from core.browser_engine import EngineSession
 
         context_kwargs: dict = {}
-        pages: list[SimpleNamespace] = []
 
         page = SimpleNamespace(url="about:blank")
         context = SimpleNamespace(

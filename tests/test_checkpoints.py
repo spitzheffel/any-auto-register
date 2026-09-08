@@ -1,9 +1,6 @@
 """检查点写入与中断资源回收。"""
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-import core.checkpoints as checkpoints
 from core.checkpoints import (
     TaskCheckpointSink,
     iter_attempt_checkpoints,
