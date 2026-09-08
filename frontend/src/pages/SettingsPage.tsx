@@ -4,6 +4,7 @@ import { Sun, Moon, Monitor } from 'lucide-react'
 import { cn, apiFetch } from '@/lib/utils'
 import { getConfig, getConfigOptions, invalidateConfigCache } from '@/lib/app-data'
 import type { ConfigOptionsResponse } from '@/lib/config-options'
+import { getBrowserEngineOptions } from '@/lib/config-options'
 import { Button } from '@/components/ui/button'
 import { Save, RefreshCw, CheckCircle, ExternalLink, Sparkles } from 'lucide-react'
 import Settings from '@/pages/Settings'
@@ -105,6 +106,7 @@ function GeneralTab({
 
   const executorOptions = configOptions?.executor_options || []
   const identityOptions = configOptions?.identity_mode_options || []
+  const engineOptions = getBrowserEngineOptions(configOptions)
   const oauthOptions = [
     { label: '不预选，由当前页面选择', value: '' },
     ...((configOptions?.oauth_provider_options || []).filter((o) => o.value !== '')),
@@ -156,6 +158,19 @@ function GeneralTab({
               className="control-surface appearance-none"
             >
               {executorOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </SettingRow>
+          <SettingRow label="浏览器内核">
+            <select
+              value={form.browser_engine || 'playwright'}
+              onChange={(e) => setForm((f) => ({ ...f, browser_engine: e.target.value }))}
+              className="control-surface appearance-none"
+            >
+              {engineOptions.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>

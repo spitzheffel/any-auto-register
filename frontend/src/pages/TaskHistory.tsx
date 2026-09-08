@@ -12,6 +12,13 @@ function shortId(id: string) {
   return id.length > 12 ? '...' + id.slice(-8) : id
 }
 
+/** 等待人工的提问只在状态旁露一眼，完整内容进详情弹窗看 */
+function truncatePrompt(prompt: string | null | undefined, max = 40): string {
+  const text = String(prompt || '').trim()
+  if (!text) return ''
+  return text.length > max ? text.slice(0, max) + '…' : text
+}
+
 function formatError(error: string | null | undefined): string {
   if (!error) return ''
   // Try to extract a readable message from JSON-like strings
@@ -146,6 +153,7 @@ export default function TaskHistory() {
               >
                 <option value="">全部状态</option>
                 <option value="running">运行中</option>
+                <option value="waiting_human">等待人工</option>
                 <option value="succeeded">成功</option>
                 <option value="failed">失败</option>
                 <option value="cancelled">已取消</option>
@@ -190,6 +198,7 @@ export default function TaskHistory() {
                 const errorCount = task.error_count || 0
                 const total = success + errorCount
                 const errorText = formatError(task.error)
+                const pendingPrompt = truncatePrompt(task.pending_interaction?.prompt)
                 return (
                   <tr
                     key={task.id}
@@ -219,9 +228,19 @@ export default function TaskHistory() {
                       <Badge variant="secondary">{task.platform || '-'}</Badge>
                     </td>
                     <td className="px-4 py-3">
-                      <Badge variant={TASK_STATUS_VARIANTS[task.status] || 'secondary'}>
-                        {getTaskStatusText(task.status)}
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={TASK_STATUS_VARIANTS[task.status] || 'secondary'}>
+                          {getTaskStatusText(task.status)}
+                        </Badge>
+                        {pendingPrompt ? (
+                          <span
+                            className="max-w-[220px] truncate text-xs text-amber-500 cursor-default"
+                            title={task.pending_interaction.prompt}
+                          >
+                            {pendingPrompt}
+                          </span>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-[var(--text-secondary)]">
                       {task.progress || '-'}

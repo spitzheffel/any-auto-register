@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getConfig, getConfigOptions, getPlatforms } from '@/lib/app-data'
 import type { ConfigOptionsResponse, ProviderOption, ProviderSetting } from '@/lib/config-options'
 import { getCaptchaStrategyLabel, getProviderSelectOptions, listProviderFieldKeys } from '@/lib/config-options'
-import { apiFetch } from '@/lib/utils'
+import { ApiError, apiFetch } from '@/lib/utils'
 import { buildExecutorOptions, buildRegistrationOptions, hasReusableOAuthBrowser, pickOAuthExecutor } from '@/lib/registration'
 import { TaskLogPanel } from '@/components/tasks/TaskLogPanel'
 import { Button } from '@/components/ui/button'
@@ -27,6 +27,25 @@ const DEFAULT_FORM: Record<string, any> = {
   mail_provider: '',
   sms_provider: '',
 }
+
+const CHANNEL_LABELS: Record<string, string> = {
+  mailbox: '邮箱',
+  sms: '短信接码',
+  captcha: '验证码打码',
+  proxy: '代理',
+}
+
+// 与后端 core/channel_bindings.py 的 SOURCE_* 对应
+const CHANNEL_SOURCE_LABELS: Record<string, string> = {
+  task_step: '步骤指定',
+  task: '手动指定',
+  platform_default: '平台默认',
+  global_default: '全局默认',
+  unset: '未配置',
+}
+
+// 同一渠道可能出现多条需求（如 otp 与 mailbox 都落到邮箱），级别取最强
+const LEVEL_RANK: Record<string, number> = { required: 2, conditional: 1 }
 
 function getProviderSetting(settings: ProviderSetting[] = [], providerKey: string) {
   return settings.find(item => item.provider_key === providerKey) || null
@@ -59,6 +78,11 @@ export default function Register() {
     oauth_provider_options: [],
   })
   const [optionsError, setOptionsError] = useState('')
+  const [requirements, setRequirements] = useState<any>(null)
+  const requirementsPlatformRef = useRef('')
+  const [submitError, setSubmitError] = useState('')
+  // 后端 400 里点名的未配置渠道，用来把对应卡片标红
+  const [rejectedChannels, setRejectedChannels] = useState<string[]>([])
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
   const handledTerminalTaskIdsRef = useRef<Set<string>>(new Set())
@@ -154,6 +178,54 @@ export default function Register() {
     ...(configOptions.sms_providers || []),
   ])
 
+  // 后端推导的需求：没有 requirements 时（老后端/请求失败）退回旧行为，全都显示
+  const requiredChannels: Record<string, any> = requirements?.channels || {}
+  const channelLevel = (channel: string): string => {
+    let strongest = ''
+    for (const entry of requirements?.requirements || []) {
+      if (entry?.channel !== channel) continue
+      if ((LEVEL_RANK[entry.level] || 0) > (LEVEL_RANK[strongest] || 0)) strongest = entry.level
+    }
+    return strongest
+  }
+  const needsChannel = (channel: string) => (requirements ? channel in requiredChannels : true)
+  const channelProviders: Record<string, ProviderOption[]> = {
+    mailbox: configOptions.mailbox_providers || [],
+    sms: configOptions.sms_providers || [],
+    captcha: configOptions.captcha_providers || [],
+  }
+  const channelProviderLabel = (channel: string, key: string) =>
+    (channelProviders[channel] || []).find(provider => provider.value === key)?.label || key
+  // 后端按 GET 参数只知道选了哪家、不知道表单里临时填的凭据；
+  // 表单里已经填了该 provider 的认证字段时，与后端创建任务时的判定保持一致，视为已配置
+  const formHasAuthFor = (channel: string, key: string) => {
+    const provider = (channelProviders[channel] || []).find(item => item.value === key)
+    return (provider?.fields || []).some(field => field.category === 'auth' && String(form[field.key] ?? '').trim())
+  }
+  const isChannelConfigured = (channel: string) => {
+    const info = requiredChannels[channel]
+    if (!info) return true
+    const selected = String(info.selected ?? info.resolved_default ?? '')
+    return Boolean(info.configured) || (Boolean(selected) && formHasAuthFor(channel, selected))
+  }
+  const channelHint = (channel: string) => {
+    const info = requiredChannels[channel]
+    if (!info) return ''
+    const parts = []
+    if (channelLevel(channel) === 'conditional') parts.push('按需触发')
+    const selected = String(info.selected ?? info.resolved_default ?? '')
+    if (selected) {
+      const source = CHANNEL_SOURCE_LABELS[info.source] || info.source || ''
+      parts.push(`将使用: ${channelProviderLabel(channel, selected)}${source ? `（${source}）` : ''}`)
+      if (!isChannelConfigured(channel)) parts.push('未配置认证信息')
+    } else {
+      parts.push('未选择服务')
+    }
+    return parts.join(' · ')
+  }
+  const missingRequiredChannels = Object.keys(requiredChannels)
+    .filter(channel => channelLevel(channel) === 'required' && !isChannelConfigured(channel))
+
   useEffect(() => {
     const defaultProviderKey = getDefaultProviderKey(configOptions.mailbox_settings || [])
     if (form.identity_provider === 'mailbox' && !form.mail_provider && defaultProviderKey) {
@@ -215,6 +287,40 @@ export default function Register() {
     }
   }, [form.platform, platforms])
 
+  // 需求由后端从流程本身推导：平台 + 执行器 + 身份模式一变就重取，
+  // 只渲染这次真正会用到的渠道选择器。渠道下拉一变也要重取——
+  // "配没配"是按当前选的那家算的
+  useEffect(() => {
+    if (!form.platform) {
+      requirementsPlatformRef.current = ''
+      setRequirements(null)
+      return
+    }
+    if (requirementsPlatformRef.current !== form.platform) {
+      // 换平台先清掉上个平台的结果，别让旧卡片和旧的 configured 状态撑到新结果回来
+      requirementsPlatformRef.current = form.platform
+      setRequirements(null)
+    }
+    let cancelled = false
+    const params = new URLSearchParams({
+      executor_type: form.executor_type || 'protocol',
+      identity_provider: form.identity_provider || 'mailbox',
+    })
+    if (form.mail_provider) params.set('mail_provider', form.mail_provider)
+    if (form.sms_provider) params.set('sms_provider', form.sms_provider)
+    if (form.captcha_solver && form.captcha_solver !== 'auto') params.set('captcha_solver', form.captcha_solver)
+    apiFetch(`/platforms/${form.platform}/requirements?${params.toString()}`)
+      .then(data => {
+        if (!cancelled) setRequirements(data)
+      })
+      .catch(() => {
+        if (!cancelled) setRequirements(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [form.platform, form.executor_type, form.identity_provider, form.mail_provider, form.sms_provider, form.captcha_solver])
+
   useEffect(() => {
     if (registrationOptions.length === 0) return
     const currentRegistration = registrationOptions.find(option =>
@@ -260,21 +366,40 @@ export default function Register() {
         extra[fieldKey] = form[fieldKey]
       }
     })
-    const res = await apiFetch('/tasks/register', {
-      method: 'POST',
-      body: JSON.stringify({
-        platform: form.platform,
-        email: form.email || null,
-        password: form.password || null,
-        count: form.count,
-        proxy: form.proxy || null,
-        executor_type: form.executor_type,
-        captcha_solver: 'auto',
-        extra,
-      }),
-    })
-    setTask(res)
-    setPolling(true)
+
+    // 渠道绑定与任务一起钉住；旧键同时保留一版，后端两边都认
+    const channelBindings: Record<string, any> = {}
+    if (needsChannel('mailbox') && form.mail_provider) channelBindings.mailbox = { key: form.mail_provider }
+    if (needsChannel('sms') && form.sms_provider) channelBindings.sms = { key: form.sms_provider }
+
+    setSubmitError('')
+    setRejectedChannels([])
+    try {
+      const res = await apiFetch('/tasks/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          platform: form.platform,
+          email: form.email || null,
+          password: form.password || null,
+          count: form.count,
+          proxy: form.proxy || null,
+          executor_type: form.executor_type,
+          captcha_solver: 'auto',
+          channel_bindings: channelBindings,
+          extra,
+        }),
+      })
+      setTask(res)
+      setPolling(true)
+    } catch (err: any) {
+      setSubmitError(err?.message || '创建任务失败')
+      const missing = err instanceof ApiError && Array.isArray(err.detail?.missing_channels)
+        ? err.detail.missing_channels
+        : []
+      setRejectedChannels(
+        Array.from(new Set(missing.map((item: any) => String(item?.channel || '')).filter(Boolean))),
+      )
+    }
   }
 
   const handleTaskDone = useCallback(async (status: string) => {
@@ -349,6 +474,15 @@ export default function Register() {
       type={field.secret ? 'password' : 'text'}
       placeholder={field.placeholder || ''}
     />
+  )
+
+  const renderRejectedHint = (channel: string) => (
+    <>
+      后端拒绝创建任务：{CHANNEL_LABELS[channel] || channel}渠道未配置认证信息。
+      请在此填写凭据，或到
+      <a href="/settings" className="mx-1 underline">设置页</a>
+      启用并保存该服务。
+    </>
   )
 
   const summaryRegistration = registrationOptions.find(option => option.identityProvider === form.identity_provider && option.oauthProvider === form.oauth_provider)?.label || '-'
@@ -450,8 +584,8 @@ export default function Register() {
             </CardContent>
           </Card>
 
-          {form.identity_provider === 'mailbox' && (
-            <Card>
+          {form.identity_provider === 'mailbox' && needsChannel('mailbox') && (
+            <Card className={rejectedChannels.includes('mailbox') ? 'border-red-500/50 bg-red-500/5' : ''}>
               <CardHeader><CardTitle>系统邮箱配置</CardTitle></CardHeader>
               <CardContent className="space-y-4">
                 {optionsError && (
@@ -459,6 +593,14 @@ export default function Register() {
                     {optionsError}
                   </div>
                 )}
+                {rejectedChannels.includes('mailbox') && (
+                  <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                    {renderRejectedHint('mailbox')}
+                  </div>
+                )}
+                {channelHint('mailbox') ? (
+                  <p className="text-xs text-[var(--text-muted)]">{channelHint('mailbox')}</p>
+                ) : null}
                 {mailboxProviderOptions.length > 0 ? (
                   <Select label="邮箱服务" k="mail_provider" options={mailboxProviderOptions} />
                 ) : (
@@ -474,8 +616,8 @@ export default function Register() {
             </Card>
           )}
 
-          {smsProviderOptions.length > 0 && (
-            <Card>
+          {smsProviderOptions.length > 0 && needsChannel('sms') && (
+            <Card className={rejectedChannels.includes('sms') ? 'border-red-500/50 bg-red-500/5' : ''}>
               <CardHeader><CardTitle>短信接码配置</CardTitle></CardHeader>
               <CardContent className="space-y-4">
                 {optionsError && (
@@ -483,6 +625,14 @@ export default function Register() {
                     {optionsError}
                   </div>
                 )}
+                {rejectedChannels.includes('sms') && (
+                  <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                    {renderRejectedHint('sms')}
+                  </div>
+                )}
+                {channelHint('sms') ? (
+                  <p className="text-xs text-[var(--text-muted)]">{channelHint('sms')}</p>
+                ) : null}
                 <Select label="短信服务" k="sms_provider" options={smsProviderOptions} />
                 {currentSmsProvider?.description ? (
                   <p className="text-xs leading-5 text-[var(--text-muted)]">{currentSmsProvider.description}</p>
@@ -517,7 +667,23 @@ export default function Register() {
                   <div className="mt-2 text-base font-medium text-[var(--text-primary)]">{summaryVerification}</div>
                 </div>
               </div>
-              <Button onClick={submit} disabled={polling} className="w-full">
+              {missingRequiredChannels.length > 0 ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs leading-5 text-amber-300">
+                  以下必需渠道还没配置好，先去
+                  <a href="/settings" className="mx-1 underline">设置页</a>
+                  启用并填写认证信息：{missingRequiredChannels.map(channel => CHANNEL_LABELS[channel] || channel).join('、')}
+                </div>
+              ) : null}
+              {submitError ? (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3.5 py-2.5 text-xs leading-5 text-red-400">
+                  {submitError}
+                </div>
+              ) : null}
+              <Button
+                onClick={submit}
+                disabled={polling || missingRequiredChannels.length > 0}
+                className="w-full"
+              >
                 {polling ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />注册中...</> : <><Play className="mr-2 h-4 w-4" />开始注册</>}
               </Button>
             </CardContent>

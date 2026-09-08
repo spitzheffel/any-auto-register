@@ -61,6 +61,17 @@ export type ConfigOptionsResponse = {
   executor_options?: ChoiceOption[]
   identity_mode_options?: ChoiceOption[]
   oauth_provider_options?: ChoiceOption[]
+  browser_engine_options?: ChoiceOption[]
+}
+
+// 后端注册表未下发时的兜底，避免设置页空下拉
+export const FALLBACK_BROWSER_ENGINE_OPTIONS: ChoiceOption[] = [
+  { label: 'Playwright（默认）', value: 'playwright' },
+]
+
+export function getBrowserEngineOptions(options: ConfigOptionsResponse | null | undefined): ChoiceOption[] {
+  const list = options?.browser_engine_options
+  return list && list.length > 0 ? list : FALLBACK_BROWSER_ENGINE_OPTIONS
 }
 
 export type ProviderSetting = {

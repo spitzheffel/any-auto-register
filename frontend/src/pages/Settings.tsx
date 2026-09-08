@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getConfig, getConfigOptions, getPlatforms, invalidateConfigCache, invalidateConfigOptionsCache, invalidatePlatformsCache } from '@/lib/app-data'
 import type { ChoiceOption, ConfigOptionsResponse, ProviderDriver, ProviderField as ProviderFieldDef, ProviderOption, ProviderSetting } from '@/lib/config-options'
-import { getCaptchaStrategyLabel } from '@/lib/config-options'
+import { getBrowserEngineOptions, getCaptchaStrategyLabel } from '@/lib/config-options'
 import { apiFetch } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -245,6 +245,7 @@ const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
         { key: 'default_identity_provider', label: '默认注册身份' },
         { key: 'default_oauth_provider', label: '默认第三方入口', placeholder: '' },
         { key: 'default_executor', label: '默认执行方式' },
+        { key: 'browser_engine', label: '浏览器内核' },
       ],
     }, {
       section: '浏览器复用',
@@ -895,6 +896,7 @@ export default function Settings({ embedded, defaultTab }: { embedded?: boolean;
   const getSelectOptions = (key: string) => {
     if (key === 'default_executor') return configOptions.executor_options || []
     if (key === 'default_identity_provider') return configOptions.identity_mode_options || []
+    if (key === 'browser_engine') return getBrowserEngineOptions(configOptions)
     if (key === 'default_oauth_provider') {
       return [
         { label: '不预选，由当前页面选择', value: '' },

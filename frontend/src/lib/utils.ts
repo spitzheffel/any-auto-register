@@ -21,6 +21,44 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+/**
+ * 后端错误响应。FastAPI 的 `detail` 可能是字符串，也可能是结构化对象
+ * （如 `{ message, missing_channels }`），原样挂在 `detail` 上供调用方细分处理。
+ */
+export class ApiError extends Error {
+  status: number
+  detail: any
+
+  constructor(message: string, status: number, detail: any) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.detail = detail
+  }
+}
+
+/** 把响应体转成可读的错误：结构化 detail 只取 message，别把整段 JSON 摊到界面上。 */
+async function toApiError(res: Response): Promise<ApiError> {
+  const text = await res.text()
+  let detail: any = text
+  try {
+    const parsed = JSON.parse(text)
+    detail = parsed?.detail ?? parsed
+  } catch {
+    // 非 JSON 响应（网关错误页等），直接用原文
+  }
+  let message = ''
+  if (typeof detail === 'string') {
+    message = detail
+  } else if (Array.isArray(detail)) {
+    // FastAPI 422 校验错误是 [{loc, msg, type}] 列表
+    message = detail.map((item: any) => item?.msg || JSON.stringify(item)).join('；')
+  } else if (typeof detail?.message === 'string') {
+    message = detail.message
+  }
+  return new ApiError(message || text || `请求失败 (${res.status})`, res.status, detail)
+}
+
 export async function apiFetch(path: string, opts?: RequestInit) {
   const res = await fetch(API + path, {
     ...opts,
@@ -31,7 +69,7 @@ export async function apiFetch(path: string, opts?: RequestInit) {
     window.location.reload()
     throw new Error('Unauthorized')
   }
-  if (!res.ok) throw new Error(await res.text())
+  if (!res.ok) throw await toApiError(res)
   return res.json()
 }
 
@@ -49,7 +87,7 @@ export async function apiDownload(path: string, opts?: RequestInit) {
     window.location.reload()
     throw new Error('Unauthorized')
   }
-  if (!res.ok) throw new Error(await res.text())
+  if (!res.ok) throw await toApiError(res)
   const blob = await res.blob()
   const disposition = res.headers.get('Content-Disposition') || ''
   const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/)
