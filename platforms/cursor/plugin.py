@@ -40,7 +40,8 @@ class CursorPlatform(BasePlatform):
 
     def _map_mailbox_result(self, result: dict) -> RegistrationResult:
         return RegistrationResult(
-            email=result["email"],
+            # 步骤流会回填 resolved_email（站点最终确认的地址）
+            email=result.get("resolved_email") or result["email"],
             password=result.get("password", ""),
             token=result.get("token", ""),
             status=AccountStatus.REGISTERED,
@@ -70,24 +71,27 @@ class CursorPlatform(BasePlatform):
         )
 
     def build_browser_registration_adapter(self):
+        def _build_flow():
+            from platforms.cursor.steps import build_flow
+
+            return build_flow()
+
+        def _build_obstacles():
+            from platforms.cursor.obstacles import build_obstacles
+
+            return build_obstacles()
+
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_oauth_result(result) if ctx.identity.identity_provider == "oauth_browser" else self._map_mailbox_result(result),
-            browser_worker_builder=lambda ctx, artifacts: __import__("platforms.cursor.browser_register", fromlist=["CursorBrowserRegister"]).CursorBrowserRegister(
-                captcha=artifacts.captcha_solver,
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                phone_callback=artifacts.phone_callback,
-                log_fn=ctx.log,
-            ),
-            browser_register_runner=lambda worker, ctx, artifacts: worker.run(
-                email=ctx.identity.email,
-                password=ctx.password or "",
-            ),
+            step_flow_builder=_build_flow,
+            obstacle_builder=_build_obstacles,
+            # Camoufox 的指纹体系是 Cursor 过 CF 的前提，不接受静默换成 Chromium
+            engine_preference="camoufox",
+            allow_engine_fallback=False,
             oauth_runner=self._run_browser_oauth,
             capability=RegistrationCapability(oauth_headless_requires_browser_reuse=True),
+            # Step 路径由 run_step_flow 把它接到 otp 能力的 builder 上
             otp_spec=OtpSpec(wait_message="等待 Cursor 邮箱验证码...", success_label="验证码"),
-            use_captcha_for_mailbox=True,
         )
 
     def build_protocol_oauth_adapter(self):
@@ -108,9 +112,13 @@ class CursorPlatform(BasePlatform):
                 password=ctx.password,
                 otp_callback=artifacts.otp_callback,
                 captcha_solver=artifacts.captcha_solver,
+                phone=artifacts.phone,
+                # 任务取消要能打断协议路径的等码
+                should_stop=getattr(ctx.runtime, "cancel", None),
             ),
             otp_spec=OtpSpec(wait_message="等待验证码..."),
             use_captcha=True,
+            use_phone=True,
         )
 
     def check_valid(self, account: Account) -> bool:
