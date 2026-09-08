@@ -69,7 +69,15 @@ AGENTS.md
 .trellis/
 .windsurf/
 .qoder/
-.cursor/
+# .cursor 下只有领域 skill 入库（由 scripts/sync_skills.py 从 .agents/skills 镜像），
+# hooks / mcp / 个人配置继续留在本地
+.cursor/*
+!.cursor/skills/
+.cursor/skills/*
+!.cursor/skills/step-engine-conventions/
+!.cursor/skills/platform-drift-check/
+!.cursor/skills/platform-from-capture/
+!.cursor/skills/failure-triage/
 docs/REFACTOR-PLAN.md
 
 # 敏感文件
