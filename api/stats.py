@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter
-from sqlmodel import Session, select, func, text
+from sqlmodel import Session, select, func
 
 from core.db import TaskLog, ProxyModel, AccountModel, AccountOverviewModel, engine
 
@@ -130,6 +130,56 @@ def stats_by_proxy():
         }
         for p in proxies
     ]
+
+
+@router.get("/by-channel")
+def stats_by_channel(days: int = 30, platform: str = ""):
+    """按 平台 × 渠道类别 × provider 聚合成功率。
+
+    数据来自 TaskLog.detail 里记录的**实际命中**渠道（不是任务请求值）——
+    FallbackMailbox 真正出邮箱的那家、打码候选链最后用上的那家，才是要统计的对象。
+    """
+    import json
+
+    cutoff = _utcnow() - timedelta(days=days)
+    with Session(engine) as session:
+        query = select(TaskLog).where(TaskLog.created_at >= cutoff)
+        if platform:
+            query = query.where(TaskLog.platform == platform)
+        logs = session.exec(query).all()
+
+    buckets: dict[tuple[str, str, str], dict] = {}
+    for log in logs:
+        try:
+            detail = json.loads(log.detail_json or "{}")
+        except Exception:
+            continue
+        for channel, provider_key in dict(detail.get("channels") or {}).items():
+            if not provider_key:
+                continue
+            key = (log.platform, str(channel), str(provider_key))
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "platform": log.platform,
+                    "channel": channel,
+                    "provider_key": provider_key,
+                    "success": 0,
+                    "fail": 0,
+                },
+            )
+            if log.status == "success":
+                bucket["success"] += 1
+            else:
+                bucket["fail"] += 1
+
+    rows = []
+    for bucket in buckets.values():
+        total = bucket["success"] + bucket["fail"]
+        bucket["total"] = total
+        bucket["success_rate"] = round(bucket["success"] / total * 100, 1) if total else 0
+        rows.append(bucket)
+    return sorted(rows, key=lambda item: (-item["total"], item["platform"]))
 
 
 @router.get("/errors")

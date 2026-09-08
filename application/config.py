@@ -21,8 +21,22 @@ class ConfigService:
         return {"ok": True, "updated": updated}
 
     def get_options(self) -> dict:
+        from core.browser_engine import DEFAULT_ENGINE, engine_spec, supported_engines
+
         platform_options = collect_platform_choice_options(self.platforms.list_platforms())
+        # 内核列表由注册表下发：前端不再各自硬编码一份，新注册的内核自动出现在下拉里
+        engine_labels = {"playwright": "Playwright", "patchright": "Patchright", "cloakbrowser": "CloakBrowser", "camoufox": "Camoufox"}
+        browser_engine_options = []
+        for name in supported_engines():
+            spec = engine_spec(name)
+            label = engine_labels.get(name, name)
+            if name == DEFAULT_ENGINE:
+                label = f"{label}（默认）"
+            elif spec is not None and spec.family != "chromium":
+                label = f"{label}（{spec.family} 系，仅隐身流程）"
+            browser_engine_options.append({"label": label, "value": name})
         return {
+            "browser_engine_options": browser_engine_options,
             "mailbox_providers": self.provider_definitions.list_definitions("mailbox", enabled_only=True),
             "captcha_providers": self.provider_definitions.list_definitions("captcha", enabled_only=True),
             "sms_providers": self.provider_definitions.list_definitions("sms", enabled_only=True),

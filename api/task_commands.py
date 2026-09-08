@@ -23,12 +23,19 @@ class RegisterTaskRequest(BaseModel):
     proxy: Optional[str] = None
     executor_type: str = "protocol"
     captcha_solver: str = "auto"
+    # {"mailbox": {"key": ..., "steps": {...}}, "sms": ..., "captcha": ...}
+    channel_bindings: dict = Field(default_factory=dict)
     extra: dict = Field(default_factory=dict)
 
 
 @router.post("/register")
 def create_register_task(body: RegisterTaskRequest):
-    return command_service.create_register_task(body.model_dump())
+    from application.tasks import MissingChannelError
+
+    try:
+        return command_service.create_register_task(body.model_dump())
+    except MissingChannelError as exc:
+        raise HTTPException(400, {"message": str(exc), "missing_channels": exc.missing})
 
 
 @router.post("/{task_id}/cancel")

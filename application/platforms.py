@@ -78,3 +78,81 @@ class PlatformsService:
 
     def get_desktop_state(self, platform: str) -> dict:
         return self.runtime.get_desktop_state(platform)
+
+    def describe_requirements(
+        self,
+        platform: str,
+        *,
+        executor_type: str = "protocol",
+        identity_provider: str = "mailbox",
+        channel_bindings: dict | None = None,
+        extra: dict | None = None,
+    ) -> dict:
+        """本次任务需要哪些渠道 + 每类按当前选择会解析到谁、配没配。
+
+        ``channel_bindings`` / ``extra`` 是用户在表单里的当前选择；不传时退化为
+        全局默认。``configured`` 必须按用户实际选的那家算，否则表单里选了 A、
+        提示却在说默认的 B 配没配。
+        """
+        from core.base_platform import RegisterConfig
+        from core.channel_bindings import CHANNEL_KINDS, ChannelBindings
+        from core.registry import get
+
+        platform_cls = get(platform)
+        instance = platform_cls(config=RegisterConfig(executor_type=executor_type))
+        requirements = instance.describe_requirements(executor_type, identity_provider)
+
+        bindings = ChannelBindings.from_payload(
+            {"channel_bindings": channel_bindings or {}, "extra": extra or {}},
+            platform=platform,
+        )
+        # 不带任何绑定的解析结果单独算一次：前端要能同时显示"你选的"和"不选会用哪家"
+        defaults = ChannelBindings.from_payload({}, platform=platform)
+        needed_channels = {item.channel for item in requirements if item.channel}
+        channels = {}
+        for kind in CHANNEL_KINDS:
+            if kind not in needed_channels:
+                continue
+            resolved = bindings.resolve(kind)
+            channels[kind] = {
+                "selected": resolved.key,
+                "resolved_default": defaults.resolve(kind).key,
+                "source": resolved.source,
+                "configured": is_channel_configured(kind, resolved.key, extra),
+            }
+
+        return {
+            "platform": platform,
+            "executor_type": executor_type,
+            "identity_provider": identity_provider,
+            "requirements": [item.to_dict() for item in requirements],
+            "channels": channels,
+        }
+
+
+def is_channel_configured(kind: str, provider_key: str, extra: dict | None = None) -> bool:
+    """该 provider 的认证字段是否填了（没有认证字段的视为已配置）。
+
+    ``extra`` 是随任务提交的表单值，和运行期一样叠在已保存设置之上：
+    只在表单里填了 key、没存设置页的用户不能被判成未配置。
+    """
+    if not provider_key:
+        return False
+    try:
+        from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
+        from infrastructure.provider_settings_repository import ProviderSettingsRepository
+
+        definition = ProviderDefinitionsRepository().get_by_key(kind, provider_key)
+        if not definition or not definition.enabled:
+            return False
+        auth_fields = [
+            str(field.get("key") or "")
+            for field in definition.get_fields()
+            if str(field.get("category") or "") == "auth" and str(field.get("key") or "")
+        ]
+        if not auth_fields:
+            return True
+        merged = ProviderSettingsRepository().resolve_runtime_settings(kind, provider_key, extra or {})
+        return any(str(merged.get(key, "")).strip() for key in auth_fields)
+    except Exception:
+        return False

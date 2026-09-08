@@ -288,6 +288,49 @@ class TaskEventModel(SQLModel, table=True):
         self.detail_json = json.dumps(data or {}, ensure_ascii=False)
 
 
+class TaskInteractionModel(SQLModel, table=True):
+    """等待人工处理的交互请求。
+
+    挂起期间 runner 线程原地阻塞并继续持有浏览器与号码租约，落库的只是
+    "问什么 / 谁回答了 / 什么时候过期"，用于 UI 展示、跨请求投递与审计。
+    """
+
+    __tablename__ = "task_interactions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    task_id: str = Field(index=True)
+    attempt_id: str = Field(default="", index=True)
+    step: str = ""
+    kind: str = Field(default="confirm")          # confirm | input | choice | captcha
+    prompt: str = ""
+    # 表单描述（fields / options）——避开 SQLModel 上已有的 schema 属性名
+    form_json: str = "{}"
+    context_json: str = "{}"                       # page_url / screenshot_path
+    status: str = Field(default="pending", index=True)  # pending|answered|expired|cancelled
+    response_json: str = "{}"
+    created_at: datetime = Field(default_factory=_utcnow)
+    expires_at: Optional[datetime] = None
+    answered_at: Optional[datetime] = None
+
+    def get_schema(self) -> dict:
+        return json.loads(self.form_json or "{}")
+
+    def set_schema(self, data: dict):
+        self.form_json = json.dumps(data or {}, ensure_ascii=False)
+
+    def get_context(self) -> dict:
+        return json.loads(self.context_json or "{}")
+
+    def set_context(self, data: dict):
+        self.context_json = json.dumps(data or {}, ensure_ascii=False)
+
+    def get_response(self) -> dict:
+        return json.loads(self.response_json or "{}")
+
+    def set_response(self, data: dict):
+        self.response_json = json.dumps(data or {}, ensure_ascii=False)
+
+
 class ProxyModel(SQLModel, table=True):
     __tablename__ = "proxies"
 

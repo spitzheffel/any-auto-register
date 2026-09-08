@@ -5,7 +5,12 @@ from dataclasses import dataclass, field
 import threading
 import time
 
-from application.tasks import claim_next_runnable_task, execute_task, mark_incomplete_tasks_interrupted
+from application.tasks import (
+    claim_next_runnable_task,
+    execute_task,
+    mark_incomplete_tasks_interrupted,
+    prune_attempt_artifacts,
+)
 
 
 @dataclass(slots=True)
@@ -31,6 +36,7 @@ class TaskRuntime:
                 return
             self._running = True
             mark_incomplete_tasks_interrupted()
+            prune_attempt_artifacts()
             self._dispatcher = threading.Thread(target=self._loop, daemon=True, name="task-runtime")
             self._dispatcher.start()
             print("[TaskRuntime] 已启动")
