@@ -4,9 +4,18 @@ from __future__ import annotations
 import logging
 import re
 import time
+from typing import Callable
+
 import requests
 
-from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification_link, _normalize_api_base_url
+from core.base_mailbox import (
+    BaseMailbox,
+    MailboxAccount,
+    _extract_verification_link,
+    _normalize_api_base_url,
+    config_proxy,
+    poll_until,
+)
 
 SCRIPT_API_SUFFIX = "/api/v1/keys"
 DEFAULT_GROUP = "register-pool"
@@ -49,7 +58,7 @@ class MailScriptMailbox(BaseMailbox):
             base_url=config.get("mail_script_base_url", ""),
             api_key=config.get("mail_script_api_key", ""),
             group=config.get("mail_script_group", ""),
-            proxy=config.get("proxy") or None,
+            proxy=config_proxy(config),
         )
 
     def _headers(self) -> dict[str, str]:
@@ -184,10 +193,11 @@ class MailScriptMailbox(BaseMailbox):
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 for msg in self._list_messages(account):
                     mid = str(msg.get("id") or "")
@@ -208,8 +218,10 @@ class MailScriptMailbox(BaseMailbox):
                         return match.group(1)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(
         self,
@@ -217,10 +229,11 @@ class MailScriptMailbox(BaseMailbox):
         keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 for msg in self._list_messages(account):
                     mid = str(msg.get("id") or "")
@@ -233,8 +246,10 @@ class MailScriptMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
     def report_success(self, account: MailboxAccount, platform: str = "") -> None:
         self._request("POST", f"/inboxes/{self._lease_id(account)}/success")

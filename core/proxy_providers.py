@@ -12,7 +12,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
-import requests
+import requests  # noqa: F401 - 既有测试以 core.proxy_providers.requests.get 为 patch 目标
 
 logger = logging.getLogger(__name__)
 
@@ -51,27 +51,26 @@ def __getattr__(name: str):
 # ---------------------------------------------------------------------------
 
 def create_proxy_provider(provider_key: str, config: dict) -> BaseProxyProvider:
-    """根据 provider_key 和配置创建代理提供者。"""
-    if provider_key == "api_extract":
-        api_url = config.get("proxy_api_url", "")
-        if not api_url:
-            raise RuntimeError("动态代理未配置 API URL")
-        provider_cls = __getattr__("ApiExtractProvider")
-        return provider_cls(
-            api_url=api_url,
-            protocol=config.get("proxy_protocol", "http"),
-            username=config.get("proxy_username", ""),
-            password=config.get("proxy_password", ""),
-        )
+    """根据 provider_key 和配置创建代理提供者（走统一 registry）。"""
+    from providers.registry import create_provider
 
-    if provider_key == "rotating_gateway":
-        gateway = config.get("proxy_gateway_url", "")
-        if not gateway:
-            raise RuntimeError("旋转代理未配置网关地址")
-        provider_cls = __getattr__("RotatingProxyProvider")
-        return provider_cls(gateway_url=gateway)
+    key = str(provider_key or "").strip()
+    try:
+        from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
 
-    raise RuntimeError(f"未知的代理 provider: {provider_key}")
+        definition = ProviderDefinitionsRepository().get_by_key("proxy", key)
+        if definition and str(definition.driver_type or "").strip():
+            key = str(definition.driver_type).strip()
+    except Exception:
+        pass
+
+    from providers.registry import get_provider_class
+
+    # 先判 driver 是否存在，再交给 from_config：否则 from_config 里的配置解析 ValueError
+    # 会被误报成"未知 provider"
+    if get_provider_class("proxy", key) is None:
+        raise RuntimeError(f"未知的代理 provider: {provider_key}")
+    return create_provider("proxy", key, dict(config or {}))
 
 
 def get_dynamic_proxy(extra: dict | None = None) -> Optional[str]:

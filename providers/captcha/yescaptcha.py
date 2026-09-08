@@ -1,11 +1,14 @@
 """YesCaptcha — cloud Turnstile solver."""
-from core.base_captcha import BaseCaptcha
+from core.base_captcha import BaseCaptcha, CaptchaChallenge, CaptchaSolution, ChallengeKind
+from core.errors import ConfigError
 from core.tls import insecure_request
 from providers.registry import register_provider
 
 
 @register_provider("captcha", "yescaptcha_api")
 class YesCaptcha(BaseCaptcha):
+    SUPPORTED_KINDS = (ChallengeKind.TURNSTILE,)
+
     def __init__(self, client_key: str):
         self.client_key = client_key
         self.api = "https://api.yescaptcha.com"
@@ -14,10 +17,15 @@ class YesCaptcha(BaseCaptcha):
     def from_config(cls, config: dict) -> 'YesCaptcha':
         client_key = str(config.get("yescaptcha_key", "") or "")
         if not client_key:
-            raise RuntimeError("YesCaptcha Key 未配置")
+            raise ConfigError("YesCaptcha Key 未配置")
         return cls(client_key)
 
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve(self, challenge: CaptchaChallenge) -> CaptchaSolution:
+        if challenge.kind != ChallengeKind.TURNSTILE:
+            raise NotImplementedError(f"YesCaptcha 不支持题型: {challenge.kind}")
+        return CaptchaSolution(token=self._solve_turnstile(challenge.page_url, challenge.site_key))
+
+    def _solve_turnstile(self, page_url: str, site_key: str) -> str:
         import requests, time
         r = insecure_request(requests.post, f"{self.api}/createTask", json={
             "clientKey": self.client_key,
@@ -37,6 +45,3 @@ class YesCaptcha(BaseCaptcha):
             if d.get("errorId", 0) != 0:
                 raise RuntimeError(f"YesCaptcha 错误: {d}")
         raise TimeoutError("YesCaptcha Turnstile 超时")
-
-    def solve_image(self, image_b64: str) -> str:
-        raise NotImplementedError

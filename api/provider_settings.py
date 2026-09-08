@@ -84,18 +84,18 @@ def test_provider(body: ProviderTestRequest):
 def _test_mailbox(driver_type: str, extra: dict, definition) -> dict:
     """尝试用给定配置创建一个邮箱，验证配置是否正确。"""
     import traceback
-    from core.base_mailbox import MAILBOX_FACTORY_REGISTRY
+    from core.base_mailbox import METADATA_CONFIG_KEY, PROXY_CONFIG_KEY
+    from providers.registry import create_provider, get_provider_class
 
-    factory = MAILBOX_FACTORY_REGISTRY.get(driver_type)
-    if not factory:
+    if get_provider_class("mailbox", driver_type) is None:
         return {"ok": False, "error": f"未找到邮箱驱动: {driver_type}"}
 
+    config = dict(extra)
+    config[PROXY_CONFIG_KEY] = None
+    config[METADATA_CONFIG_KEY] = definition.get_metadata() if definition else {}
+
     try:
-        if driver_type in ("generic_http_mailbox", "generic_http"):
-            pipeline_config = definition.get_metadata() if definition else {}
-            mailbox = factory(extra, None, pipeline_config=pipeline_config)
-        else:
-            mailbox = factory(extra, None)
+        mailbox = create_provider("mailbox", driver_type, config)
 
         if hasattr(mailbox, "peek_email"):
             email = mailbox.peek_email()

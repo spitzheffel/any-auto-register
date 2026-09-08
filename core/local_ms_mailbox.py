@@ -16,15 +16,15 @@ import json
 import re
 import ssl
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import decode_header
 from pathlib import Path
+from typing import Callable
 
 import requests
 
-from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification_link
+from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification_link, config_proxy, poll_until
 
 
 GRAPH_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -188,7 +188,7 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
             state_file=config.get("local_ms_pool_state_file", ""),
             graph_scope=config.get("local_ms_graph_scope", ""),
             allow_reuse=_truthy(config.get("local_ms_pool_allow_reuse")),
-            proxy=config.get("proxy") or None,
+            proxy=config_proxy(config),
         )
 
     def _load_pool_text(self) -> str:
@@ -531,11 +531,14 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         seen = set(before_ids or [])
         pattern = re.compile(code_pattern or r"(?<!#)(?<!\d)(\d{6})(?!\d)")
-        start = time.time()
-        while time.time() - start < timeout:
+
+        # 这里故意不吞 _messages 的异常：缺 Graph token / IMAP 配置属于配置错误，
+        # 应当立刻暴露而不是静默轮询到超时
+        def _poll() -> str | None:
             for mail in self._messages(account):
                 mid = self._message_id(mail)
                 if mid and mid in seen:
@@ -548,8 +551,10 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
                 match = pattern.search(text)
                 if match:
                     return match.group(1) if match.groups() else match.group(0)
-            time.sleep(5)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=5, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(
         self,
@@ -557,10 +562,11 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
         keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             for mail in self._messages(account):
                 mid = self._message_id(mail)
                 if mid and mid in seen:
@@ -570,5 +576,7 @@ class LocalMicrosoftMailboxPool(BaseMailbox):
                 link = _extract_verification_link(self._message_text(mail), keyword)
                 if link:
                     return link
-            time.sleep(5)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=5, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")

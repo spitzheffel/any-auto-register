@@ -1,17 +1,66 @@
-"""验证码解决器基类 — 具体实现已迁移到 providers/captcha/"""
+"""验证码解决器基类 — 具体实现已迁移到 providers/captcha/
+
+题型是数据不是方法：新增 reCAPTCHA / hCaptcha / Arkose 等只需加一个
+``ChallengeKind`` 常量与对应的 handler，solver 用 ``SUPPORTED_KINDS`` 声明能力，
+基类与既有实现都不用改。
+"""
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+class ChallengeKind:
+    TURNSTILE = "turnstile"
+    IMAGE = "image"
+
+
+@dataclass(slots=True)
+class CaptchaChallenge:
+    """一道待解的验证码题。"""
+
+    kind: str
+    page_url: str = ""
+    site_key: str = ""
+    payload: str = ""           # 图片验证码的 base64 等题面数据
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CaptchaSolution:
+    """解题结果：token 类（Turnstile 等）或 text 类（图片验证码）。"""
+
+    token: str = ""
+    text: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def value(self) -> str:
+        return self.token or self.text
 
 
 class BaseCaptcha(ABC):
-    @abstractmethod
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
-        """返回 Turnstile token"""
-        ...
+    #: 该 solver 能处理的题型；留空表示"什么都不支持"
+    SUPPORTED_KINDS: tuple[str, ...] = ()
 
     @abstractmethod
-    def solve_image(self, image_b64: str) -> str:
-        """返回图片验证码文字"""
+    def solve(self, challenge: CaptchaChallenge) -> CaptchaSolution:
+        """解一道题；不支持的题型抛 NotImplementedError。"""
         ...
+
+    @classmethod
+    def supports(cls, kind: str) -> bool:
+        return str(kind) in cls.SUPPORTED_KINDS
+
+    # -- 兼容既有平台调用点的薄包装（不再是抽象方法） ------------------
+    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+        return self.solve(
+            CaptchaChallenge(kind=ChallengeKind.TURNSTILE, page_url=page_url, site_key=site_key)
+        ).value
+
+    def solve_image(self, image_b64: str) -> str:
+        return self.solve(
+            CaptchaChallenge(kind=ChallengeKind.IMAGE, payload=image_b64)
+        ).value
 
 
 # ---------------------------------------------------------------------------
@@ -65,33 +114,18 @@ def has_captcha_configured(provider_key: str, extra: dict | None = None) -> bool
 
 
 def create_captcha_solver(provider_key: str, extra: dict | None = None) -> BaseCaptcha:
+    from core.registration.errors import CaptchaConfigurationError
     from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
     from infrastructure.provider_settings_repository import ProviderSettingsRepository
-    from providers.captcha.local_solver import LocalSolverCaptcha
-    from providers.captcha.manual import ManualCaptcha
-    from providers.captcha.twocaptcha import TwoCaptcha
-    from providers.captcha.yescaptcha import YesCaptcha
+    from providers.registry import create_provider
 
     key = str(provider_key or "").strip().lower()
     if key == "manual":
-        return ManualCaptcha()
+        return create_provider("captcha", "manual", dict(extra or {}))
 
     definition = ProviderDefinitionsRepository().get_by_key("captcha", key)
     if not definition or not definition.enabled:
-        raise RuntimeError(f"验证码 provider 不存在或未启用: {key}")
+        raise CaptchaConfigurationError(f"验证码 provider 不存在或未启用: {key}")
     merged = ProviderSettingsRepository().resolve_runtime_settings("captcha", key, extra or {})
-    driver_type = (definition.driver_type if definition else key).lower()
-
-    if driver_type == "local_solver":
-        return LocalSolverCaptcha(str(merged.get("solver_url", "") or ""))
-    if driver_type == "yescaptcha_api":
-        client_key = str(merged.get("yescaptcha_key", "") or "")
-        if not client_key:
-            raise RuntimeError("YesCaptcha Key 未配置，无法继续协议注册")
-        return YesCaptcha(client_key)
-    if driver_type == "twocaptcha_api":
-        api_key = str(merged.get("twocaptcha_key", "") or "")
-        if not api_key:
-            raise RuntimeError("2Captcha Key 未配置，无法继续协议注册")
-        return TwoCaptcha(api_key)
-    raise ValueError(f"未知验证码解决器: {provider_key}")
+    driver_type = str(definition.driver_type or key).lower()
+    return create_provider("captcha", driver_type, merged)

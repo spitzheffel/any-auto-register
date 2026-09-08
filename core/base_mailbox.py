@@ -4,10 +4,13 @@ from dataclasses import dataclass
 import html
 import logging
 import re
+import time
+from typing import Callable, TypeVar
 from urllib.parse import urlencode, urlparse
 
 logger = logging.getLogger(__name__)
 
+from core.errors import AttemptCancelled, TransientError
 from core.tls import insecure_request, mark_session_insecure, suppress_insecure_request_warning
 
 # ── 邮箱服务默认 API 地址（统一维护，需要时在此修改） ──
@@ -17,12 +20,83 @@ DEFAULT_TEMPMAIL_LOL_API_URL = "https://api.tempmail.lol/v2"
 DEFAULT_TEMPMAIL_WEB_BASE_URL = "https://web2.temp-mail.org"
 DEFAULT_YYDSMAIL_API_URL = "https://maliapi.215.im/v1"
 
+# create_mailbox 注入到 from_config 配置里的两个保留键
+PROXY_CONFIG_KEY = "_proxy"
+METADATA_CONFIG_KEY = "_provider_metadata"
+
+
+def config_proxy(config: dict) -> str | None:
+    config = config or {}
+    return config.get(PROXY_CONFIG_KEY) or config.get("proxy") or None
+
+
+def config_metadata(config: dict) -> dict:
+    return dict((config or {}).get(METADATA_CONFIG_KEY) or {})
+
 
 @dataclass
 class MailboxAccount:
     email: str
     account_id: str = ""
     extra: dict = None  # 平台额外信息
+
+
+def accepts_should_stop(method) -> bool:
+    """判断某个等待方法是否接受 should_stop（未接入的实现退化为跑满 timeout）。"""
+    import inspect
+
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    if "should_stop" in params:
+        return True
+    return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+
+
+ShouldStop = Callable[[], bool] | None
+_T = TypeVar("_T")
+
+
+def raise_if_cancelled(should_stop: ShouldStop) -> None:
+    if should_stop is not None and should_stop():
+        raise AttemptCancelled("等待邮件期间任务被取消")
+
+
+class MailboxTimeoutError(TransientError, TimeoutError):
+    """等邮件超时。
+
+    分类为 transient：换一次尝试通常就好了，任务层据此补投；同时仍是 TimeoutError，
+    既有按 ``except TimeoutError`` 处理的调用方不受影响。
+    """
+
+
+def poll_until(
+    fetch: Callable[[], _T | None],
+    *,
+    timeout: float,
+    interval: float,
+    should_stop: ShouldStop = None,
+    timeout_message: str = "等待邮件超时",
+) -> _T:
+    """邮箱等码/等链接共用的轮询骨架：反复调用 ``fetch`` 直到拿到真值或超时。
+
+    取消检查放在 sleep 前后而不是只放循环头：一轮取信可能要十几秒（远端回源），
+    sleep 又是整段等待里最长的空闲期，两头都查才能把取消延迟压到一个 interval 以内。
+
+    ``fetch`` 抛出的异常原样上抛——是否吞掉网络错误由各实现自己决定，
+    这里不替它们做主；``AttemptCancelled`` 是 BaseException，不会被
+    实现里的 ``except Exception`` 顺手吃掉。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        raise_if_cancelled(should_stop)
+        result = fetch()
+        if result:
+            return result
+        raise_if_cancelled(should_stop)
+        time.sleep(interval)
+    raise MailboxTimeoutError(f"{timeout_message} ({timeout}s)")
 
 
 class BaseMailbox(ABC):
@@ -34,8 +108,14 @@ class BaseMailbox(ABC):
     @abstractmethod
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
                       timeout: int = 120, before_ids: set = None,
-                      code_pattern: str = None) -> str:
-        """等待并返回验证码，code_pattern 为自定义正则（默认匹配6位数字）"""
+                      code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        """等待并返回验证码，code_pattern 为自定义正则（默认匹配6位数字）
+
+        ``should_stop`` 是取消令牌：轮询期间每轮检查，返回 True 时抛
+        ``AttemptCancelled`` 提前放弃，而不是跑满 timeout。实现应通过
+        ``poll_until`` 接入，避免各自手写循环再漏掉检查点。
+        """
         ...
 
     @abstractmethod
@@ -44,7 +124,8 @@ class BaseMailbox(ABC):
         ...
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         """等待并返回验证链接。默认由具体 provider 自行实现。"""
         raise NotImplementedError(f"{self.__class__.__name__} 暂不支持 wait_for_link()")
 
@@ -125,23 +206,25 @@ class FallbackMailbox(BaseMailbox):
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
                       timeout: int = 120, before_ids: set = None,
-                      code_pattern: str = None) -> str:
-        return self._resolve_mailbox(account).wait_for_code(
-            account,
-            keyword=keyword,
-            timeout=timeout,
-            before_ids=before_ids,
-            code_pattern=code_pattern,
-        )
+                      code_pattern: str = None, should_stop=None) -> str:
+        target = self._resolve_mailbox(account).wait_for_code
+        kwargs = {
+            "keyword": keyword,
+            "timeout": timeout,
+            "before_ids": before_ids,
+            "code_pattern": code_pattern,
+        }
+        if should_stop is not None and accepts_should_stop(target):
+            kwargs["should_stop"] = should_stop
+        return target(account, **kwargs)
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        return self._resolve_mailbox(account).wait_for_link(
-            account,
-            keyword=keyword,
-            timeout=timeout,
-            before_ids=before_ids,
-        )
+                      timeout: int = 120, before_ids: set = None, should_stop=None) -> str:
+        target = self._resolve_mailbox(account).wait_for_link
+        kwargs = {"keyword": keyword, "timeout": timeout, "before_ids": before_ids}
+        if should_stop is not None and accepts_should_stop(target):
+            kwargs["should_stop"] = should_stop
+        return target(account, **kwargs)
 
     def report_success(self, account: MailboxAccount, platform: str = "") -> None:
         self._resolve_mailbox(account).report_success(account, platform=platform)
@@ -192,161 +275,15 @@ def _normalize_api_base_url(value: str | None, *, default: str, label: str) -> s
     return raw.rstrip("/")
 
 
-def _create_tempmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return TempMailLolMailbox(proxy=proxy)
-
-
-def _create_tempmail_web(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return TempMailWebMailbox(
-        base_url=extra.get("tempmail_web_base_url", ""),
-        proxy=proxy,
-    )
-
-
-def _create_duckmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return DuckMailMailbox(
-        api_url=extra.get("duckmail_api_url", ""),
-        provider_url=extra.get("duckmail_provider_url", ""),
-        bearer=extra.get("duckmail_bearer", ""),
-        proxy=proxy,
-    )
-
-
-def _create_ddg_email(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return DDGEmailMailbox(
-        bearer=extra.get("ddg_bearer", ""),
-        imap_host=extra.get("ddg_imap_host", ""),
-        imap_user=extra.get("ddg_imap_user", ""),
-        imap_pass=extra.get("ddg_imap_pass", ""),
-        proxy=proxy,
-    )
-
-
-def _create_freemail(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return FreemailMailbox(
-        api_url=extra.get("freemail_api_url", ""),
-        admin_token=extra.get("freemail_admin_token", ""),
-        username=extra.get("freemail_username", ""),
-        password=extra.get("freemail_password", ""),
-        proxy=proxy,
-    )
-
-
-def _create_moemail(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return MoeMailMailbox(
-        api_url=extra.get("moemail_api_url"),
-        username=extra.get("moemail_username", ""),
-        password=extra.get("moemail_password", ""),
-        session_token=extra.get("moemail_session_token", ""),
-        proxy=proxy,
-    )
-
-
-def _create_cfworker(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return CFWorkerMailbox(
-        api_url=extra.get("cfworker_api_url", ""),
-        admin_token=extra.get("cfworker_admin_token", ""),
-        domain=extra.get("cfworker_domain", ""),
-        fingerprint=extra.get("cfworker_fingerprint", ""),
-        proxy=proxy,
-    )
-
-
-def _create_testmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return TestmailMailbox(
-        api_url=extra.get("testmail_api_url", ""),
-        api_key=extra.get("testmail_api_key", ""),
-        namespace=extra.get("testmail_namespace", ""),
-        tag_prefix=extra.get("testmail_tag_prefix", ""),
-        proxy=proxy,
-    )
-
-
-def _create_local_ms_pool(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    from core.local_ms_mailbox import LocalMicrosoftMailboxPool
-
-    return LocalMicrosoftMailboxPool(
-        pool_text=extra.get("local_ms_pool_text", ""),
-        pool_file=extra.get("local_ms_pool_file", ""),
-        state_file=extra.get("local_ms_pool_state_file", ""),
-        graph_scope=extra.get("local_ms_graph_scope", ""),
-        allow_reuse=str(extra.get("local_ms_pool_allow_reuse", "")).strip().lower() in {"1", "true", "yes", "on"},
-        proxy=proxy,
-    )
-
-
-def _create_laoudo(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return LaoudoMailbox(
-        auth_token=extra.get("laoudo_auth", ""),
-        email=extra.get("laoudo_email", ""),
-        account_id=extra.get("laoudo_account_id", ""),
-    )
-
-
-def _create_yydsmail(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    return YYDSMailMailbox(
-        api_key=extra.get("yydsmail_api_key", ""),
-        domain=extra.get("yydsmail_domain", ""),
-        base_url=extra.get("yydsmail_base_url", ""),
-        proxy=proxy,
-    )
-
-
-def _create_mail_script(extra: dict, proxy: str | None) -> 'BaseMailbox':
-    from core.mail_script_mailbox import MailScriptMailbox
-
-    return MailScriptMailbox(
-        base_url=extra.get("mail_script_base_url", ""),
-        api_key=extra.get("mail_script_api_key", ""),
-        group=extra.get("mail_script_group", ""),
-        proxy=proxy,
-    )
-
-
-def _create_generic_http(extra: dict, proxy: str | None, *, pipeline_config: dict | None = None) -> 'BaseMailbox':
-    from core.generic_http_mailbox import GenericHttpMailbox
-    return GenericHttpMailbox(
-        pipeline_config=pipeline_config or {},
-        settings=extra,
-        proxy=proxy,
-    )
-
-
-MAILBOX_FACTORY_REGISTRY = {
-    "generic_http_mailbox": _create_generic_http,
-    "tempmail_lol_api": _create_tempmail,
-    "tempmail_web_api": _create_tempmail_web,
-    "duckmail_api": _create_duckmail,
-    "ddg_email": _create_ddg_email,
-    "ddg_email_api": _create_ddg_email,
-    "freemail_api": _create_freemail,
-    "moemail_api": _create_moemail,
-    "cfworker_admin_api": _create_cfworker,
-    "testmail_api": _create_testmail,
-    "local_ms_pool": _create_local_ms_pool,
-    "laoudo_api": _create_laoudo,
-    "yydsmail_api": _create_yydsmail,
-    "mail_script_api": _create_mail_script,
-    # backward-compat fallback
-    "generic_http": _create_generic_http,
-    "tempmail_lol": _create_tempmail,
-    "tempmail_web": _create_tempmail_web,
-    "duckmail": _create_duckmail,
-    "freemail": _create_freemail,
-    "moemail": _create_moemail,
-    "cfworker": _create_cfworker,
-    "testmail": _create_testmail,
-    "local_ms": _create_local_ms_pool,
-    "laoudo": _create_laoudo,
-    "yydsmail": _create_yydsmail,
-    "mail_script": _create_mail_script,
-}
-
-
 def create_mailbox(provider: str, extra: dict = None, proxy: str = None) -> 'BaseMailbox':
-    """工厂方法：根据 provider 创建对应的 mailbox 实例"""
+    """工厂方法：根据 provider 创建对应的 mailbox 实例。
+
+    每个 provider 类自己从合并后的配置里读自己的键（``from_config``），
+    这里只负责决定顺序（主 provider + fallback 链）并交给统一 registry 实例化。
+    """
     from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
     from infrastructure.provider_settings_repository import ProviderSettingsRepository
+    from providers.registry import create_provider
 
     definitions_repo = ProviderDefinitionsRepository()
     settings_repo = ProviderSettingsRepository()
@@ -382,16 +319,12 @@ def create_mailbox(provider: str, extra: dict = None, proxy: str = None) -> 'Bas
         if not current_definition or not current_definition.enabled:
             continue
         resolved_extra = settings_repo.resolve_runtime_settings("mailbox", key, base_extra)
-        lookup_key = current_definition.driver_type if current_definition else key
-        factory = MAILBOX_FACTORY_REGISTRY.get(lookup_key)
-        if not factory:
-            continue
+        resolved_extra[PROXY_CONFIG_KEY] = proxy
+        # 数据驱动的 provider（generic_http）要用 definition 里的管道描述
+        resolved_extra[METADATA_CONFIG_KEY] = current_definition.get_metadata() or {}
+        driver_type = str(current_definition.driver_type or key)
         try:
-            if lookup_key in ("generic_http_mailbox", "generic_http"):
-                pipeline_config = current_definition.get_metadata() if current_definition else {}
-                providers.append((key, factory(resolved_extra, proxy, pipeline_config=pipeline_config)))
-            else:
-                providers.append((key, factory(resolved_extra, proxy)))
+            providers.append((key, create_provider("mailbox", driver_type, resolved_extra)))
         except Exception as exc:
             if key == provider_key:
                 raise RuntimeError(f"邮箱 provider {key} 初始化失败: {exc}") from exc
@@ -406,6 +339,15 @@ def create_mailbox(provider: str, extra: dict = None, proxy: str = None) -> 'Bas
 
 class LaoudoMailbox(BaseMailbox):
     """laoudo.com 邮箱服务"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'LaoudoMailbox':
+        return cls(
+            auth_token=config.get("laoudo_auth", ""),
+            email=config.get("laoudo_email", ""),
+            account_id=config.get("laoudo_account_id", ""),
+        )
+
     def __init__(self, auth_token: str, email: str, account_id: str, api_url: str = ""):
         self.auth = auth_token
         self._email = email
@@ -464,13 +406,14 @@ class LaoudoMailbox(BaseMailbox):
         return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "trae",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import re, time
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re
         from curl_cffi import requests as curl_requests
         seen = set(before_ids) if before_ids else set()
-        start = time.time()
         h = {"authorization": self.auth, "user-agent": self._ua}
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = curl_requests.get(
                     f"{self.api}/list",
@@ -494,17 +437,19 @@ class LaoudoMailbox(BaseMailbox):
                             return m.group(1) if m.groups() else m.group(0)
             except Exception:
                 pass
-            time.sleep(4)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=4, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         from curl_cffi import requests as curl_requests
         seen = set(before_ids or [])
-        start = time.time()
         headers = {"authorization": self.auth, "user-agent": self._ua}
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = curl_requests.get(
                     f"{self.api}/list",
@@ -526,12 +471,22 @@ class LaoudoMailbox(BaseMailbox):
                             return link
             except Exception:
                 pass
-            time.sleep(4)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=4, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class AitreMailbox(BaseMailbox):
     """mail.aitre.cc 临时邮箱"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'AitreMailbox':
+        return cls(
+            email=config.get("aitre_email", ""),
+            api_url=config.get("aitre_api_url", ""),
+        )
+
     def __init__(self, email: str, api_url: str = ""):
         self._email = email
         self.api = (api_url or DEFAULT_AITRE_API_URL).rstrip("/")
@@ -549,12 +504,14 @@ class AitreMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "trae",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import re, time, requests
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re, requests
         seen = set(before_ids) if before_ids else set()
         last_check = None
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
+            nonlocal last_check
             params = {"email": account.email}
             if last_check:
                 params["lastCheck"] = last_check
@@ -577,16 +534,20 @@ class AitreMailbox(BaseMailbox):
                             return m.group(1) if m.groups() else m.group(0)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time, requests
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import requests
         seen = set(before_ids or [])
         last_check = None
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
+            nonlocal last_check
             params = {"email": account.email}
             if last_check:
                 params["lastCheck"] = last_check
@@ -607,12 +568,18 @@ class AitreMailbox(BaseMailbox):
                             return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class TempMailLolMailbox(BaseMailbox):
     """tempmail.lol 免费临时邮箱（无需注册，自动生成）"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'TempMailLolMailbox':
+        return cls(proxy=config_proxy(config), api_url=config.get("tempmail_lol_api_url", ""))
 
     def __init__(self, proxy: str = None, api_url: str = ""):
         self.api = (api_url or DEFAULT_TEMPMAIL_LOL_API_URL).rstrip("/")
@@ -658,11 +625,12 @@ class TempMailLolMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import re, time, requests
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re, requests
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = requests.get(f"{self.api}/inbox",
                     params={"token": account.account_id},
@@ -680,15 +648,18 @@ class TempMailLolMailbox(BaseMailbox):
                         return m.group(1) if m.groups() else m.group(0)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time, requests
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import requests
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = requests.get(f"{self.api}/inbox",
                     params={"token": account.account_id},
@@ -704,8 +675,10 @@ class TempMailLolMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class YYDSMailMailbox(BaseMailbox):
@@ -713,6 +686,15 @@ class YYDSMailMailbox(BaseMailbox):
 
     统一响应信封为 {"success": bool, "data": {...}}；认证使用请求头 X-API-Key: AC-...。
     """
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'YYDSMailMailbox':
+        return cls(
+            api_key=config.get("yydsmail_api_key", ""),
+            domain=config.get("yydsmail_domain", ""),
+            base_url=config.get("yydsmail_base_url", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(self, api_key: str = "", domain: str = "", base_url: str = "", proxy: str = None):
         self.api_key = str(api_key or "").strip()
@@ -841,13 +823,13 @@ class YYDSMailMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         import re
-        import time
 
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 for msg in self._list_messages(account.email):
                     mid = str(msg.get("id", ""))
@@ -872,16 +854,17 @@ class YYDSMailMailbox(BaseMailbox):
                         return match.group(1) if match.groups() else match.group(0)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
-
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 for msg in self._list_messages(account.email):
                     mid = str(msg.get("id", ""))
@@ -894,12 +877,18 @@ class YYDSMailMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class TempMailWebMailbox(BaseMailbox):
     """参考项目同款 Temp-Mail Web API。"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'TempMailWebMailbox':
+        return cls(base_url=config.get("tempmail_web_base_url", ""), proxy=config_proxy(config))
 
     def __init__(self, base_url: str = "", proxy: str = None):
         self.base_url = _normalize_api_base_url(
@@ -1094,12 +1083,11 @@ class TempMailWebMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import time
-
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 messages = self._fetch_messages(account)
                 for item in messages:
@@ -1119,16 +1107,17 @@ class TempMailWebMailbox(BaseMailbox):
                         return code
             except Exception:
                 pass
-            time.sleep(5)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=5, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
-
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 messages = self._fetch_messages(account)
                 for item in messages:
@@ -1145,8 +1134,10 @@ class TempMailWebMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(5)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=5, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
     def __del__(self):
         executor = getattr(self, "_executor", None)
@@ -1165,6 +1156,15 @@ class TempMailWebMailbox(BaseMailbox):
 
 class DuckMailMailbox(BaseMailbox):
     """DuckMail 自动生成邮箱（随机创建账号）"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'DuckMailMailbox':
+        return cls(
+            api_url=config.get("duckmail_api_url", ""),
+            provider_url=config.get("duckmail_provider_url", ""),
+            bearer=config.get("duckmail_bearer", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(self, api_url: str = "",
                  provider_url: str = "",
@@ -1247,11 +1247,12 @@ class DuckMailMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import re, time, requests
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re, requests
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = insecure_request(requests.get, f"{self.api}/api/mail?endpoint=%2Fmessages%3Fpage%3D1",
                     headers={"authorization": f"Bearer {account.account_id}",
@@ -1277,15 +1278,18 @@ class DuckMailMailbox(BaseMailbox):
                     if m: return m.group(1)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time, requests
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import requests
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = insecure_request(requests.get, f"{self.api}/api/mail?endpoint=%2Fmessages%3Fpage%3D1",
                     headers={"authorization": f"Bearer {account.account_id}",
@@ -1311,12 +1315,24 @@ class DuckMailMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class CFWorkerMailbox(BaseMailbox):
     """Cloudflare Worker 自建临时邮箱服务"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'CFWorkerMailbox':
+        return cls(
+            api_url=config.get("cfworker_api_url", ""),
+            admin_token=config.get("cfworker_admin_token", ""),
+            domain=config.get("cfworker_domain", ""),
+            fingerprint=config.get("cfworker_fingerprint", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(self, api_url: str, admin_token: str = "", domain: str = "",
                  fingerprint: str = "", proxy: str = None):
@@ -1389,11 +1405,12 @@ class CFWorkerMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import re, time
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 mails = self._get_mails(account.email)
                 for mail in sorted(mails, key=lambda x: x.get("id", 0), reverse=True):
@@ -1418,15 +1435,17 @@ class CFWorkerMailbox(BaseMailbox):
                         return m.group(1) if m.groups() else m.group(0)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 mails = self._get_mails(account.email)
                 for mail in sorted(mails, key=lambda x: x.get("id", 0), reverse=True):
@@ -1440,12 +1459,24 @@ class CFWorkerMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class MoeMailMailbox(BaseMailbox):
     """MoeMail (sall.cc) 邮箱服务 - 自动注册账号并生成临时邮箱"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'MoeMailMailbox':
+        return cls(
+            api_url=config.get("moemail_api_url"),
+            username=config.get("moemail_username", ""),
+            password=config.get("moemail_password", ""),
+            session_token=config.get("moemail_session_token", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(
         self,
@@ -1675,12 +1706,13 @@ class MoeMailMailbox(BaseMailbox):
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
                       timeout: int = 120, before_ids: set = None,
-                      code_pattern: str = None) -> str:
-        import re, time
+                      code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re
         seen = set(before_ids or [])
-        start = time.time()
         pattern = re.compile(code_pattern) if code_pattern else None
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 with suppress_insecure_request_warning():
                     r = self._session.get(f"{self.api}/api/emails/{account.account_id}",
@@ -1699,15 +1731,17 @@ class MoeMailMailbox(BaseMailbox):
                     if m: return m.group(1) if m.groups() else m.group(0) if code_pattern else m.group(1)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 with suppress_insecure_request_warning():
                     r = self._session.get(f"{self.api}/api/emails/{account.account_id}",
@@ -1730,8 +1764,10 @@ class MoeMailMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class FreemailMailbox(BaseMailbox):
@@ -1740,6 +1776,16 @@ class FreemailMailbox(BaseMailbox):
     项目: https://github.com/idinging/freemail
     支持管理员令牌或账号密码两种认证方式
     """
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'FreemailMailbox':
+        return cls(
+            api_url=config.get("freemail_api_url", ""),
+            admin_token=config.get("freemail_admin_token", ""),
+            username=config.get("freemail_username", ""),
+            password=config.get("freemail_password", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(self, api_url: str, admin_token: str = "",
                  username: str = "", password: str = "",
@@ -1820,11 +1866,12 @@ class FreemailMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
-        import re, time
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        import re
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = self._session.get(f"{self.api}/api/emails",
                     params={"mailbox": account.email, "limit": 20}, timeout=10)
@@ -1842,15 +1889,17 @@ class FreemailMailbox(BaseMailbox):
                     if m: return m.group(1)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         seen = set(before_ids or [])
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 r = self._session.get(f"{self.api}/api/emails",
                     params={"mailbox": account.email, "limit": 20}, timeout=10)
@@ -1868,12 +1917,24 @@ class FreemailMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class TestmailMailbox(BaseMailbox):
     """testmail.app 邮箱服务，地址格式为 {namespace}.{tag}@inbox.testmail.app。"""
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'TestmailMailbox':
+        return cls(
+            api_url=config.get("testmail_api_url", ""),
+            api_key=config.get("testmail_api_key", ""),
+            namespace=config.get("testmail_namespace", ""),
+            tag_prefix=config.get("testmail_tag_prefix", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(
         self,
@@ -1998,9 +2059,9 @@ class TestmailMailbox(BaseMailbox):
             return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None, code_pattern: str = None) -> str:
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         import re
-        import time
 
         tag = str(account.account_id or "")
         if not tag:
@@ -2008,8 +2069,8 @@ class TestmailMailbox(BaseMailbox):
         seen = set(before_ids or [])
         started = ((account.extra or {}).get("provider_resource") or {}).get("metadata", {}).get("created_at_ms")
         pattern = re.compile(code_pattern) if code_pattern else None
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 mails = self._query_inbox(tag=tag, timestamp_from=started, limit=20)
                 for mail in sorted(mails, key=lambda item: item.get("timestamp", 0), reverse=True):
@@ -2026,20 +2087,21 @@ class TestmailMailbox(BaseMailbox):
                         return match.group(1) if match.groups() else match.group(0)
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(self, account: MailboxAccount, keyword: str = "",
-                      timeout: int = 120, before_ids: set = None) -> str:
-        import time
-
+                      timeout: int = 120, before_ids: set = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
         tag = str(account.account_id or "")
         if not tag:
             raise RuntimeError("Testmail mailbox 缺少 tag")
         seen = set(before_ids or [])
         started = ((account.extra or {}).get("provider_resource") or {}).get("metadata", {}).get("created_at_ms")
-        start = time.time()
-        while time.time() - start < timeout:
+
+        def _poll() -> str | None:
             try:
                 mails = self._query_inbox(tag=tag, timestamp_from=started, limit=20)
                 for mail in sorted(mails, key=lambda item: item.get("timestamp", 0), reverse=True):
@@ -2052,8 +2114,10 @@ class TestmailMailbox(BaseMailbox):
                         return link
             except Exception:
                 pass
-            time.sleep(3)
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+            return None
+
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
 
 
 class DDGEmailMailbox(BaseMailbox):
@@ -2071,6 +2135,16 @@ class DDGEmailMailbox(BaseMailbox):
         "hotmail.com": "imap-mail.outlook.com",
         "yahoo.com": "imap.mail.yahoo.com",
     }
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'DDGEmailMailbox':
+        return cls(
+            bearer=config.get("ddg_bearer", ""),
+            imap_host=config.get("ddg_imap_host", ""),
+            imap_user=config.get("ddg_imap_user", ""),
+            imap_pass=config.get("ddg_imap_pass", ""),
+            proxy=config_proxy(config),
+        )
 
     def __init__(self, bearer: str = "", imap_host: str = "",
                  imap_user: str = "", imap_pass: str = "", proxy: str = None):
@@ -2125,20 +2199,20 @@ class DDGEmailMailbox(BaseMailbox):
     def get_current_ids(self, account: MailboxAccount) -> set:
         return set()
 
-    def _imap_search_code(self, alias_email: str, timeout: int, code_pattern: str = None) -> str:
+    def _imap_search_code(self, alias_email: str, timeout: int, code_pattern: str = None,
+                          should_stop: Callable[[], bool] | None = None) -> str:
         import imaplib
         import email as email_lib
-        import time
 
         if not self.imap_user or not self.imap_pass:
             raise RuntimeError("DDG Email 未配置 IMAP（ddg_imap_user / ddg_imap_pass），无法读取验证码")
 
         pattern = code_pattern or r'(?<!\d)(\d{6})(?!\d)'
-        start = time.time()
         seen_ids: set[bytes] = set()
         baseline_done = False
 
-        while time.time() - start < timeout:
+        def _poll() -> str | None:
+            nonlocal seen_ids, baseline_done
             conn = None
             try:
                 conn = imaplib.IMAP4_SSL(self.imap_host, 993, timeout=10)
@@ -2152,15 +2226,14 @@ class DDGEmailMailbox(BaseMailbox):
                 _, msg_nums = conn.search(None, "ALL")
                 ids = msg_nums[0].split() if msg_nums and msg_nums[0] else []
 
-                # 首次轮询：把所有已有邮件标记为已读，只等新邮件
+                # 首次轮询：把所有已有邮件标记为已读，只等新邮件；本轮不取信，交给 helper sleep 后再来
                 if not baseline_done:
                     seen_ids = set(ids)
                     baseline_done = True
                     print(f"[DDG Email] IMAP baseline: {len(seen_ids)} existing emails skipped")
                     conn.logout()
                     conn = None
-                    time.sleep(5)
-                    continue
+                    return None
 
                 for mid in reversed(ids[-30:]):
                     if mid in seen_ids:
@@ -2218,11 +2291,13 @@ class DDGEmailMailbox(BaseMailbox):
                         conn.logout()
                     except Exception:
                         pass
-            time.sleep(5)
+            return None
 
-        raise TimeoutError(f"DDG Email IMAP 等待验证码超时 ({timeout}s)")
+        return poll_until(_poll, timeout=timeout, interval=5, should_stop=should_stop,
+                          timeout_message="DDG Email IMAP 等待验证码超时")
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
                       timeout: int = 120, before_ids: set = None,
-                      code_pattern: str = None) -> str:
-        return self._imap_search_code(account.email, timeout, code_pattern)
+                      code_pattern: str = None,
+                      should_stop: Callable[[], bool] | None = None) -> str:
+        return self._imap_search_code(account.email, timeout, code_pattern, should_stop=should_stop)

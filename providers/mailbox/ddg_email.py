@@ -2,4 +2,4 @@
 from core.base_mailbox import DDGEmailMailbox  # noqa: F401
 from providers.registry import register_provider
 
-register_provider("mailbox", "ddg_email")(DDGEmailMailbox)
+register_provider("mailbox", "ddg_email", aliases=("ddg_email_api",))(DDGEmailMailbox)

@@ -2,4 +2,4 @@
 from core.base_mailbox import TempMailWebMailbox  # noqa: F401
 from providers.registry import register_provider
 
-register_provider("mailbox", "tempmail_web_api")(TempMailWebMailbox)
+register_provider("mailbox", "tempmail_web_api", aliases=("tempmail_web",))(TempMailWebMailbox)

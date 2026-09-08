@@ -1,10 +1,13 @@
 """2Captcha — cloud Turnstile solver."""
-from core.base_captcha import BaseCaptcha
+from core.base_captcha import BaseCaptcha, CaptchaChallenge, CaptchaSolution, ChallengeKind
+from core.errors import ConfigError
 from providers.registry import register_provider
 
 
 @register_provider("captcha", "twocaptcha_api")
 class TwoCaptcha(BaseCaptcha):
+    SUPPORTED_KINDS = (ChallengeKind.TURNSTILE,)
+
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.api = "https://2captcha.com"
@@ -13,10 +16,15 @@ class TwoCaptcha(BaseCaptcha):
     def from_config(cls, config: dict) -> 'TwoCaptcha':
         api_key = str(config.get("twocaptcha_key", "") or "")
         if not api_key:
-            raise RuntimeError("2Captcha Key 未配置")
+            raise ConfigError("2Captcha Key 未配置")
         return cls(api_key)
 
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve(self, challenge: CaptchaChallenge) -> CaptchaSolution:
+        if challenge.kind != ChallengeKind.TURNSTILE:
+            raise NotImplementedError(f"2Captcha 不支持题型: {challenge.kind}")
+        return CaptchaSolution(token=self._solve_turnstile(challenge.page_url, challenge.site_key))
+
+    def _solve_turnstile(self, page_url: str, site_key: str) -> str:
         import time
         import requests
 
@@ -58,6 +66,3 @@ class TwoCaptcha(BaseCaptcha):
             if data.get("request") not in {"CAPCHA_NOT_READY", "CAPTCHA_NOT_READY"}:
                 raise RuntimeError(f"2Captcha 错误: {data}")
         raise TimeoutError("2Captcha Turnstile 超时")
-
-    def solve_image(self, image_b64: str) -> str:
-        raise NotImplementedError

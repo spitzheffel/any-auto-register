@@ -381,6 +381,18 @@ _BUILTIN_DEFINITIONS: list[dict] = [
             {"key": "register_reuse_phone_to_max", "label": "复用号码至最大", "type": "toggle", "hint": "默认关闭：ChatGPT 风控不允许同一号码短时间内绑定多个账号，复用会白耗号码的 20 分钟有效期"},
         ],
     },
+    {
+        "provider_type": "sms",
+        "provider_key": "manual_sms",
+        "label": "人工接码",
+        "description": "用自己的手机号：任务会挂起并在任务详情页向你要号码和验证码（仅 Web 模式可用）",
+        "driver_type": "manual_sms",
+        "default_auth_mode": "",
+        "enabled": False,
+        "category": "manual",
+        "auth_modes": [],
+        "fields": [],
+    },
     # ── proxy ────────────────────────────────────────────────────────
     {
         "provider_type": "proxy",
@@ -442,6 +454,8 @@ class ProviderDefinitionsRepository:
                         provider_key=seed["provider_key"],
                         created_at=_utcnow(),
                     )
+                    # enabled 是用户开关，只在首次种入时取种子默认值，重启不得复位
+                    item.enabled = seed.get("enabled", True)
                     logger.info("种子数据: 新增 %s/%s", seed["provider_type"], seed["provider_key"])
 
                 # 更新元数据（每次启动都同步，确保代码变更生效）
@@ -449,7 +463,6 @@ class ProviderDefinitionsRepository:
                 item.description = seed.get("description", "")
                 item.driver_type = seed.get("driver_type", seed["provider_key"])
                 item.default_auth_mode = seed.get("default_auth_mode", "")
-                item.enabled = seed.get("enabled", True)
                 item.is_builtin = True
                 item.category = seed.get("category", "")
                 item.set_auth_modes(list(seed.get("auth_modes") or []))

@@ -1,11 +1,13 @@
 """Local Turnstile solver (Camoufox / patchright)."""
-from core.base_captcha import BaseCaptcha
+from core.base_captcha import BaseCaptcha, CaptchaChallenge, CaptchaSolution, ChallengeKind
 from providers.registry import register_provider
 
 
 @register_provider("captcha", "local_solver")
 class LocalSolverCaptcha(BaseCaptcha):
     """调用本地 api_solver 服务解 Turnstile（Camoufox/patchright）"""
+
+    SUPPORTED_KINDS = (ChallengeKind.TURNSTILE,)
 
     def __init__(self, solver_url: str = ""):
         self.solver_url = solver_url.rstrip("/")
@@ -14,7 +16,12 @@ class LocalSolverCaptcha(BaseCaptcha):
     def from_config(cls, config: dict) -> 'LocalSolverCaptcha':
         return cls(str(config.get("solver_url", "") or ""))
 
-    def solve_turnstile(self, page_url: str, site_key: str) -> str:
+    def solve(self, challenge: CaptchaChallenge) -> CaptchaSolution:
+        if challenge.kind != ChallengeKind.TURNSTILE:
+            raise NotImplementedError(f"LocalSolver 不支持题型: {challenge.kind}")
+        return CaptchaSolution(token=self._solve_turnstile(challenge.page_url, challenge.site_key))
+
+    def _solve_turnstile(self, page_url: str, site_key: str) -> str:
         import requests, time
         # 提交任务
         r = requests.get(
@@ -47,9 +54,6 @@ class LocalSolverCaptcha(BaseCaptcha):
                 elif status == "CAPTCHA_FAIL":
                     raise RuntimeError("LocalSolver Turnstile 失败")
         raise TimeoutError("LocalSolver Turnstile 超时")
-
-    def solve_image(self, image_b64: str) -> str:
-        raise NotImplementedError
 
     @staticmethod
     def start_solver(headless: bool = True, browser_type: str = "camoufox",

@@ -10,13 +10,13 @@
 from __future__ import annotations
 
 import re
-import time
 from copy import deepcopy
+from typing import Callable
 from urllib.parse import urlencode
 
 import requests
 
-from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification_link
+from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification_link, poll_until
 from core.tls import mark_session_insecure, suppress_insecure_request_warning
 
 
@@ -81,6 +81,16 @@ class GenericHttpMailbox(BaseMailbox):
 
     当 pipeline_config 为空时，自动从 settings 的 flat 字段构建管道。
     """
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'GenericHttpMailbox':
+        from core.base_mailbox import config_metadata, config_proxy
+
+        return cls(
+            pipeline_config=config_metadata(config),
+            settings=config,
+            proxy=config_proxy(config),
+        )
 
     def __init__(
         self,
@@ -342,6 +352,7 @@ class GenericHttpMailbox(BaseMailbox):
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         self._run_auth()
         self._vars["email"] = account.email
@@ -357,9 +368,8 @@ class GenericHttpMailbox(BaseMailbox):
         body_fields = self._pipeline.get("response_body_fields", ["subject", "content", "html", "text", "body", "preview"])
 
         seen = set(before_ids or [])
-        start = time.time()
 
-        while time.time() - start < timeout:
+        def _poll() -> str | None:
             try:
                 resp = self._execute_step(list_step)
                 items = _deep_get(resp, list_path) if list_path else resp
@@ -406,9 +416,10 @@ class GenericHttpMailbox(BaseMailbox):
 
             except Exception:
                 pass
-            time.sleep(3)
+            return None
 
-        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证码超时")
 
     def wait_for_link(
         self,
@@ -416,6 +427,7 @@ class GenericHttpMailbox(BaseMailbox):
         keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         self._run_auth()
         self._vars["email"] = account.email
@@ -431,9 +443,8 @@ class GenericHttpMailbox(BaseMailbox):
         body_fields = self._pipeline.get("response_body_fields", ["subject", "content", "html", "text", "body", "preview"])
 
         seen = set(before_ids or [])
-        start = time.time()
 
-        while time.time() - start < timeout:
+        def _poll() -> str | None:
             try:
                 resp = self._execute_step(list_step)
                 items = _deep_get(resp, list_path) if list_path else resp
@@ -468,6 +479,7 @@ class GenericHttpMailbox(BaseMailbox):
 
             except Exception:
                 pass
-            time.sleep(3)
+            return None
 
-        raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
+        return poll_until(_poll, timeout=timeout, interval=3, should_stop=should_stop,
+                          timeout_message="等待验证链接超时")
