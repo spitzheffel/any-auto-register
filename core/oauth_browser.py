@@ -1,7 +1,6 @@
 """共享的 OAuth 浏览器辅助（支持普通 Playwright / Chrome Profile / CDP）。"""
 import time
 from typing import Callable, Iterable, Optional
-from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -114,17 +113,9 @@ def _relaunch_chrome_with_debug_port(port: int = 9222) -> bool:
 
 
 def _build_proxy_config(proxy: Optional[str]) -> Optional[dict]:
-    if not proxy:
-        return None
-    parsed = urlparse(proxy)
-    if not parsed.scheme or not parsed.hostname or not parsed.port:
-        return {"server": proxy}
-    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
-    if parsed.username:
-        config["username"] = parsed.username
-    if parsed.password:
-        config["password"] = parsed.password
-    return config
+    from .browser_engine import build_proxy_config
+
+    return build_proxy_config(proxy)
 
 
 _GOOGLE_ACCOUNT_SELECTORS = [
@@ -137,7 +128,11 @@ _GOOGLE_ACCOUNT_SELECTORS = [
 
 
 class OAuthBrowser:
-    """全自动 OAuth 浏览器（支持普通 Playwright / Chrome Profile / CDP）。"""
+    """全自动 OAuth 浏览器（支持普通 Playwright / Chrome Profile / CDP）。
+
+    engine 可选 playwright / patchright / cloakbrowser，仅作用于"无系统 Chrome
+    时的普通启动"分支；CDP 与 Profile 分支连接的是本机真实 Chrome，不切换。
+    """
 
     def __init__(
         self,
@@ -146,26 +141,38 @@ class OAuthBrowser:
         headless: bool = False,
         chrome_user_data_dir: str = "",
         chrome_cdp_url: str = "",
+        engine: str = "",
         log_fn: Callable[[str], None] = print,
     ):
         self.proxy = proxy
         self.headless = headless
         self.chrome_user_data_dir = chrome_user_data_dir
         self.chrome_cdp_url = chrome_cdp_url
+        self.engine = engine
         self.log = log_fn
         self._pw = None
+        self._session = None  # browser_engine.EngineSession（普通启动分支）
+        self._resolved_engine = "playwright"
         self.browser = None
         self.context = None
         self.page = None
         self._persistent = False  # launch_persistent_context path
 
+    def _ensure_driver(self):
+        if self._pw is None:
+            self._pw = sync_playwright().start()
+        return self._pw
+
     def __enter__(self):
-        self._pw = sync_playwright().start()
+        from .browser_engine import start_browser
+
         proxy_cfg = _build_proxy_config(self.proxy)
+        # CDP / Profile 分支连的是真 Chrome，与内核无关；只有普通启动分支才解析内核
+        self._resolved_engine = ""
 
         if self.chrome_cdp_url:
             # Connect to a running Chrome instance via CDP
-            self.browser = self._pw.chromium.connect_over_cdp(self.chrome_cdp_url)
+            self.browser = self._ensure_driver().chromium.connect_over_cdp(self.chrome_cdp_url)
             self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
             pages = self.context.pages
             self.page = pages[0] if pages else self.context.new_page()
@@ -177,7 +184,7 @@ class OAuthBrowser:
             }
             if proxy_cfg:
                 launch_kwargs["proxy"] = proxy_cfg
-            self.context = self._pw.chromium.launch_persistent_context(
+            self.context = self._ensure_driver().chromium.launch_persistent_context(
                 self.chrome_user_data_dir,
                 **launch_kwargs,
             )
@@ -197,17 +204,21 @@ class OAuthBrowser:
                         cdp_url = "http://127.0.0.1:9222"
             if cdp_url:
                 self.log(f"[OAuthBrowser] 连接已运行的 Chrome (CDP): {cdp_url}")
-                self.browser = self._pw.chromium.connect_over_cdp(cdp_url)
+                self.browser = self._ensure_driver().chromium.connect_over_cdp(cdp_url)
                 self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
                 pages = self.context.pages
                 self.page = pages[0] if pages else self.context.new_page()
             else:
-                # Fallback: plain Playwright Chromium
-                self.log("[OAuthBrowser] 未找到系统 Chrome，使用 Playwright Chromium")
-                launch_kwargs = {"headless": self.headless}
-                if proxy_cfg:
-                    launch_kwargs["proxy"] = proxy_cfg
-                self.browser = self._pw.chromium.launch(**launch_kwargs)
+                # Fallback: 按 engine 启动 Chromium（start_browser 内部解析并打印所用内核）
+                self.log("[OAuthBrowser] 未找到系统 Chrome，按配置的内核启动 Chromium")
+                self._session = start_browser(
+                    engine=self.engine,
+                    headless=self.headless,
+                    proxy=self.proxy,
+                    log_fn=self.log,
+                )
+                self._resolved_engine = self._session.engine
+                self.browser = self._session.browser
                 self.context = self.browser.new_context()
                 self.page = self.context.new_page()
 
@@ -226,6 +237,8 @@ class OAuthBrowser:
                     if self.browser:
                         self.browser.close()
         finally:
+            if self._session:
+                self._session.close()
             if self._pw:
                 self._pw.stop()
 

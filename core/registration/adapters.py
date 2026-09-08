@@ -35,6 +35,11 @@ class BrowserRegistrationAdapter:
     link_spec: LinkSpec | None = None
     use_captcha_for_mailbox: bool = False
     preflight: Callable[[RegistrationContext], None] | None = None
+    # 提供步骤流的平台走 StepRunner；未提供的仍走上面的 worker 路径
+    step_flow_builder: Callable[[], Any] | None = None
+    obstacle_builder: Callable[[], Any] | None = None
+    engine_preference: str = ""
+    allow_engine_fallback: bool = False
 
 
 @dataclass(slots=True)
@@ -47,6 +52,7 @@ class ProtocolMailboxAdapter:
     link_spec: LinkSpec | None = None
     use_captcha: bool = False
     use_executor: bool = False
+    use_phone: bool = False
     preflight: Callable[[RegistrationContext], None] | None = None
 
 

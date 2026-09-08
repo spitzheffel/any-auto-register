@@ -1,9 +1,15 @@
-"""build_otp_callback 不得在同一次注册里重复返回同一封邮件的旧验证码。"""
+"""build_otp_callback 不得在同一次注册里重复返回同一封邮件的旧验证码，
+且要把取消令牌透传到接受它的邮箱实现。"""
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 from core.base_platform import RegisterConfig
+from core.errors import AttemptCancelled
+from core.generic_http_mailbox import GenericHttpMailbox
 from core.registration import RegistrationContext
 from core.registration.helpers import build_otp_callback
 
@@ -78,3 +84,32 @@ def test_failed_lookup_does_not_grow_seen_set():
 
     mailbox.deliver_next()
     assert otp_cb() == "111111"
+
+
+def test_legacy_mailbox_without_should_stop_is_still_callable_with_token():
+    # 第三方/旧实现没接 should_stop 时，回调不能把它硬塞进去导致 TypeError
+    mailbox = _FakeMailbox([("mail-1", "111111")])
+    mailbox.deliver_next()
+    otp_cb = build_otp_callback(_make_ctx(mailbox))
+
+    assert otp_cb(should_stop=lambda: True) == "111111"
+
+
+def test_should_stop_reaches_real_provider_and_cancel_propagates():
+    mailbox = GenericHttpMailbox(
+        pipeline_config={"list_emails": {"method": "GET", "path": "/messages"}},
+        settings={"api_url": "http://127.0.0.1:9", "email": "user@example.com"},
+    )
+    otp_cb = build_otp_callback(_make_ctx(mailbox), timeout=5)
+    checks: list[int] = []
+
+    def should_stop() -> bool:
+        checks.append(1)
+        return len(checks) >= 2
+
+    with patch.object(mailbox, "_execute_step", return_value={"messages": []}) as execute:
+        with pytest.raises(AttemptCancelled):
+            otp_cb(should_stop=should_stop)
+    # 取信一次、第二次询问令牌即中断，没有跑到 5s 超时
+    assert execute.call_count == 1
+    assert len(checks) == 2

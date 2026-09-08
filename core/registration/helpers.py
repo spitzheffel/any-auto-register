@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.base_sms import create_phone_callbacks
+from core.base_mailbox import accepts_should_stop
+from core.phone_verification import PhoneVerification, create_phone_verification
 
 from .errors import BrowserReuseRequiredError, IdentityResolutionError, RegistrationUnsupportedError
 from .models import RegistrationContext
@@ -61,13 +62,15 @@ def build_otp_callback(
     # 一次性快照，如果不累积，第二次要码会重新扫到上一封验证邮件并返回旧验证码。
     seen_ids: set = set(getattr(ctx.identity, "before_ids", None) or set())
 
-    def otp_cb():
+    def otp_cb(*, should_stop=None):
         ctx.log(wait_message)
         kwargs = {"keyword": keyword, "before_ids": set(seen_ids)}
         if timeout is not None:
             kwargs["timeout"] = timeout
         if code_pattern:
             kwargs["code_pattern"] = code_pattern
+        if should_stop is not None and accepts_should_stop(mailbox.wait_for_code):
+            kwargs["should_stop"] = should_stop
         code = mailbox.wait_for_code(mail_acct, **kwargs)
         if code:
             ctx.log(f"{success_label}: {code}")
@@ -80,36 +83,38 @@ def build_otp_callback(
     return otp_cb
 
 
-def build_phone_callbacks(
+def build_phone_verification(
     ctx: RegistrationContext,
     *,
     platform: str | None = None,
     service: str | None = None,
-):
+    provider_key: str = "",
+    human=None,
+) -> PhoneVerification | None:
+    from core.channel_bindings import SMS, ChannelBindings
     from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
     from infrastructure.provider_settings_repository import ProviderSettingsRepository
 
     extra = ctx.extra
-    requested_provider_key = str(
-        extra.get("sms_provider")
-        or extra.get("phone_provider")
-        or ""
-    ).strip()
     settings_repo = ProviderSettingsRepository()
     definitions_repo = ProviderDefinitionsRepository()
 
-    provider_key = requested_provider_key
-    source = "task params"
+    provider_key = str(provider_key or "").strip()
+    source = "capability binding"
     if not provider_key:
-        provider_key = str(settings_repo.get_default_provider_key("sms") or "").strip()
-        source = "global default"
+        # 任务创建时钉住的绑定优先；没有运行时（脚本直调）再从 extra 旧键解析
+        bindings = getattr(getattr(ctx, "runtime", None), "bindings", None)
+        if bindings is None:
+            bindings = ChannelBindings.from_payload({"extra": extra}, platform=ctx.platform_name)
+        resolved = bindings.resolve(SMS)
+        provider_key = resolved.key
+        source = resolved.source
+    if not provider_key and extra.get("sms_activate_api_key"):
+        provider_key = "sms_activate"
+        source = "legacy sms_activate_api_key"
     if not provider_key:
-        if extra.get("sms_activate_api_key"):
-            provider_key = "sms_activate"
-            source = "legacy sms_activate_api_key"
-    if not provider_key:
-        ctx.log("[SMS] 未配置 SMS provider（任务参数/全局默认/历史兼容字段都为空），phone_callback=None — 注册到 add_phone 步骤将抛错")
-        return None, None
+        ctx.log("[SMS] 未配置 SMS provider（任务参数/全局默认/历史兼容字段都为空），phone=None — 注册到 add_phone 步骤将抛错")
+        return None
 
     definition = definitions_repo.get_by_key("sms", provider_key)
     merged = settings_repo.resolve_runtime_settings("sms", provider_key, extra) if definition else dict(extra)
@@ -122,39 +127,29 @@ def build_phone_callbacks(
             if str(field.get("category") or "").strip() == "auth"
         ]
     if auth_fields and not any(str(merged.get(field_key, "")).strip() for field_key in auth_fields):
-        ctx.log(f"[SMS] provider={provider_key} (来源={source}) 已找到 definition，但认证字段 {auth_fields} 全部为空，phone_callback=None")
-        return None, None
+        ctx.log(f"[SMS] provider={provider_key} (来源={source}) 已找到 definition，但认证字段 {auth_fields} 全部为空，phone=None")
+        return None
 
     if ctx.proxy and not str(merged.get("sms_proxy") or merged.get("proxy") or "").strip():
         merged["sms_proxy"] = ctx.proxy
+    if human is None:
+        human = getattr(getattr(ctx, "runtime", None), "human", None)
+    if human is not None:
+        # 人工接码 provider 从这里拿到通道；只进本次的 config 副本
+        merged["human_channel"] = human
 
-    country = str(
-        merged.get("sms_country")
-        or merged.get("phone_country")
-        or merged.get("sms_activate_country")
-        or merged.get("sms_activate_default_country")
-        or merged.get("herosms_country")
-        or merged.get("herosms_default_country")
-        or merged.get("smsbower_country")
-        or merged.get("smsbower_default_country")
-        or ""
-    ).strip()
+    # 只认通用键：厂商前缀键（herosms_*/smsbower_*/sms_activate_*）由各 provider
+    # 自己在 from_config 里读，不再在通用层堆 or 链
+    country = str(merged.get("sms_country") or merged.get("phone_country") or "").strip()
     platform_name = str(platform or ctx.platform_name or "").strip().lower()
-    explicit_service = str(
-        service
-        or extra.get("sms_service")
-        or extra.get("herosms_service")
-        or extra.get("smsbower_service")
-        or extra.get("sms_activate_service")
-        or ""
-    ).strip().lower()
+    explicit_service = str(service or extra.get("sms_service") or "").strip().lower()
     ctx.log(
-        f"[SMS] phone_callback 已就绪: provider={provider_key}(来源={source}) "
+        f"[SMS] phone 渠道已就绪: provider={provider_key}(来源={source}) "
         f"platform={platform_name or 'unknown'} "
         f"service_override={explicit_service or 'none'} "
         f"默认country={country or 'default'}"
     )
-    return create_phone_callbacks(
+    return create_phone_verification(
         provider_key,
         merged,
         platform=platform_name,
@@ -178,12 +173,14 @@ def build_link_callback(
     if not mailbox or not mail_acct:
         return None
 
-    def link_cb():
+    def link_cb(*, should_stop=None):
         ctx.log(wait_message)
         before_ids = mailbox.get_current_ids(mail_acct)
         kwargs = {"keyword": keyword, "before_ids": before_ids}
         if timeout is not None:
             kwargs["timeout"] = timeout
+        if should_stop is not None and accepts_should_stop(mailbox.wait_for_link):
+            kwargs["should_stop"] = should_stop
         link = mailbox.wait_for_link(mail_acct, **kwargs)
         if link:
             preview = link if len(link) <= preview_chars else f"{link[:preview_chars]}..."

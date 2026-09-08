@@ -3,34 +3,56 @@ from ..base_executor import BaseExecutor, Response
 
 
 class PlaywrightExecutor(BaseExecutor):
-    def __init__(self, proxy: str = None, headless: bool = True):
+    def __init__(self, proxy: str = None, headless: bool = True, engine: str = ""):
         super().__init__(proxy)
         self.headless = headless
+        self.engine = engine
+        self._session = None
         self._browser = None
         self._context = None
         self._page = None
         self._init()
 
     def _init(self):
-        from playwright.sync_api import sync_playwright
-        self._pw = sync_playwright().start()
-        launch_opts = {
-            "headless": self.headless,
-            "args": [
+        from core.browser_engine import (
+            DEFAULT_ENGINE,
+            FAMILY_CHROMIUM,
+            engine_family,
+            engine_spec,
+            resolve_engine,
+            start_browser,
+        )
+        from core.errors import ConfigError
+
+        # 这个执行器的启动参数与 UA 都是 Chromium 专属：全局把内核设成 camoufox（Firefox 系）
+        # 只该影响显式走 browser_engine 的隐身流程，不能顺手把这里也切过去
+        try:
+            resolved = resolve_engine(self.engine, lambda message: None)
+        except ConfigError:
+            resolved = DEFAULT_ENGINE
+        if engine_family(resolved) != FAMILY_CHROMIUM:
+            print(f"[PlaywrightExecutor] 内核 {resolved} 不是 Chromium 系，改用 {DEFAULT_ENGINE}")
+            resolved = DEFAULT_ENGINE
+
+        self._session = start_browser(
+            engine=resolved,
+            headless=self.headless,
+            proxy=self.proxy,
+            launch_args=[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
-            ]
-        }
-        if self.proxy:
-            launch_opts["proxy"] = {"server": self.proxy}
-        self._browser = self._pw.chromium.launch(**launch_opts)
-        
-        # 设置更长的默认超时
-        self._context = self._browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ],
         )
+        self._browser = self._session.browser
+
+        # 设置更长的默认超时
+        context_opts = {"viewport": {"width": 1280, "height": 720}}
+        # 隐身内核（cloakbrowser）的指纹由二进制保证一致性，覆盖 UA 反而穿帮；非 Chromium 系同理
+        spec = engine_spec(self._session.engine)
+        if not (spec and spec.stealth) and self._session.family == FAMILY_CHROMIUM:
+            context_opts["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        self._context = self._browser.new_context(**context_opts)
         self._context.set_default_timeout(60000)  # 60秒默认超时
         self._page = self._context.new_page()
 
@@ -127,7 +149,9 @@ class PlaywrightExecutor(BaseExecutor):
         return self._page.press(selector, key, **kwargs)
 
     def close(self) -> None:
-        if self._browser:
-            self._browser.close()
-        if self._pw:
-            self._pw.stop()
+        if self._session is not None:
+            self._session.close()
+            self._session = None
+            self._browser = None
+            self._context = None
+            self._page = None

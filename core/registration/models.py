@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .runtime import call_log
+
 
 @dataclass(slots=True)
 class RegistrationCapability:
@@ -23,7 +25,9 @@ class RegistrationContext:
     config: Any
     email: str | None
     password: str | None
-    log_fn: Callable[[str], None]
+    log_fn: Callable[..., None]
+    # core.registration.runtime.StepRuntime —— 任务层注入的日志 / 取消 / 人工通道 / 检查点 / 渠道绑定
+    runtime: Any = None
 
     @property
     def executor_type(self) -> str:
@@ -37,16 +41,16 @@ class RegistrationContext:
     def extra(self) -> dict[str, Any]:
         return dict(getattr(self.config, "extra", {}) or {})
 
-    def log(self, message: str) -> None:
-        self.log_fn(message)
+    def log(self, message: str, **kwargs: Any) -> None:
+        call_log(self.log_fn, message, **kwargs)
 
 
 @dataclass(slots=True)
 class RegistrationArtifacts:
     otp_callback: Callable[[], str] | None = None
     verification_link_callback: Callable[[], str] | None = None
-    phone_callback: Callable[[], str] | None = None
-    phone_cleanup: Callable[[], None] | None = None
+    # core.phone_verification.PhoneVerification —— 平台自行 acquire / release 租约
+    phone: Any = None
     captcha_solver: Any = None
     executor: Any = None
     raw_result: Any = None
