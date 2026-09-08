@@ -29,30 +29,49 @@ class TestIsPhoneRejectedError:
         assert not _is_phone_rejected_error("")
 
 
-class _FakePhoneCallback:
+class _FakeLease:
+    """记录 release / swap 的 PhoneLease 替身。"""
+
+    def __init__(self, phone, index: int):
+        self.phone = phone
+        self.index = index
+        self.released_as: str | None = None
+
+    @property
+    def phone_number(self) -> str:
+        return f"+1555000{self.index}"
+
+    def release(self, outcome: str = "unused") -> None:
+        self.released_as = outcome
+        self.phone.events.append(("release", outcome, self.index))
+
+    def swap(self):
+        self.release("rejected")
+        return self.phone.acquire()
+
+
+class _FakePhoneVerification:
     def __init__(self):
-        self.events: list[tuple[str, str]] = []
-        self.phase = "need_code"
-        self.activation = object()
-        self.completed = True
+        self.events: list[tuple] = []
+        self.leases: list[_FakeLease] = []
 
-    def mark_send_failed(self, reason: str = "") -> None:
-        self.events.append(("send_failed", reason))
+    def acquire(self) -> _FakeLease:
+        lease = _FakeLease(self, len(self.leases) + 1)
+        self.leases.append(lease)
+        self.events.append(("acquire", lease.index))
+        return lease
 
-    def mark_code_failed(self, reason: str = "") -> None:
-        self.events.append(("code_failed", reason))
-
-    def cleanup(self) -> None:
-        self.events.append(("cleanup", ""))
+    def close(self) -> None:
+        self.events.append(("close",))
 
 
 class TestAddPhoneRetry:
     def test_phone_rejection_triggers_new_number(self, monkeypatch):
-        phone_callback = _FakePhoneCallback()
+        phone = _FakePhoneVerification()
         attempts = []
 
-        def fake_attempt(page, callback, **kwargs):
-            attempts.append(len(attempts))
+        def fake_attempt(page, lease, **kwargs):
+            attempts.append(lease)
             if len(attempts) == 1:
                 raise PhoneRejectedError("手机号被拒绝: This phone number was recently used.")
             return {"page_type": "oauth_callback"}
@@ -61,7 +80,7 @@ class TestAddPhoneRetry:
 
         result = browser_register._handle_add_phone_challenge(
             page=None,
-            phone_callback=phone_callback,
+            phone=phone,
             device_id="dev",
             user_agent="ua",
             log=lambda message: None,
@@ -69,16 +88,15 @@ class TestAddPhoneRetry:
 
         assert result == {"page_type": "oauth_callback"}
         assert len(attempts) == 2
-        # 换号前必须作废旧号码并复位到 need_number，否则会再次拿到同一个号
-        assert ("cleanup", "") in phone_callback.events
-        assert phone_callback.phase == "need_number"
-        assert phone_callback.activation is None
-        assert phone_callback.completed is False
+        # 换号必须走 swap：旧号码以 rejected 归还，再租一个新的
+        assert attempts[0] is not attempts[1]
+        assert attempts[0].released_as == "rejected"
+        assert phone.events == [("acquire", 1), ("release", "rejected", 1), ("acquire", 2)]
 
     def test_non_retryable_error_propagates(self, monkeypatch):
-        phone_callback = _FakePhoneCallback()
+        phone = _FakePhoneVerification()
 
-        def fake_attempt(page, callback, **kwargs):
+        def fake_attempt(page, lease, **kwargs):
             raise RuntimeError("未找到手机号输入框")
 
         monkeypatch.setattr(browser_register, "_do_add_phone_attempt", fake_attempt)
@@ -86,16 +104,16 @@ class TestAddPhoneRetry:
         with pytest.raises(RuntimeError, match="未找到手机号输入框"):
             browser_register._handle_add_phone_challenge(
                 page=None,
-                phone_callback=phone_callback,
+                phone=phone,
                 device_id="dev",
                 user_agent="ua",
                 log=lambda message: None,
             )
 
     def test_gives_up_after_max_attempts(self, monkeypatch):
-        phone_callback = _FakePhoneCallback()
+        phone = _FakePhoneVerification()
 
-        def fake_attempt(page, callback, **kwargs):
+        def fake_attempt(page, lease, **kwargs):
             raise PhoneRejectedError("手机号被拒绝: recently used")
 
         monkeypatch.setattr(browser_register, "_do_add_phone_attempt", fake_attempt)
@@ -103,11 +121,23 @@ class TestAddPhoneRetry:
         with pytest.raises(PhoneRejectedError):
             browser_register._handle_add_phone_challenge(
                 page=None,
-                phone_callback=phone_callback,
+                phone=phone,
                 device_id="dev",
                 user_agent="ua",
                 log=lambda message: None,
                 max_phone_attempts=2,
             )
 
-        assert phone_callback.events.count(("cleanup", "")) == 2
+        # 两次尝试 => 两次租号，其中第一个号在换号时被作废
+        assert [event for event in phone.events if event[0] == "acquire"] == [("acquire", 1), ("acquire", 2)]
+        assert phone.leases[0].released_as == "rejected"
+
+    def test_missing_phone_channel_raises(self):
+        with pytest.raises(RuntimeError, match="未配置接码渠道"):
+            browser_register._handle_add_phone_challenge(
+                page=None,
+                phone=None,
+                device_id="dev",
+                user_agent="ua",
+                log=lambda message: None,
+            )

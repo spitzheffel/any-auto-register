@@ -2,7 +2,6 @@
 import re
 import time
 from typing import Callable, Optional
-from urllib.parse import urlparse
 
 import requests
 from camoufox.sync_api import Camoufox
@@ -357,19 +356,10 @@ def inject_turnstile_token(page, token: str) -> bool:
 
 
 def _build_proxy_config(proxy: Optional[str]) -> Optional[dict]:
-    if not proxy:
-        return None
+    # 代理 URL → Playwright 配置的拆分逻辑统一在 core.browser_engine，各平台不再各留一份
+    from core.browser_engine import build_proxy_config
 
-    parsed = urlparse(proxy)
-    if not parsed.scheme or not parsed.hostname or not parsed.port:
-        return {"server": proxy}
-
-    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
-    if parsed.username:
-        config["username"] = parsed.username
-    if parsed.password:
-        config["password"] = parsed.password
-    return config
+    return build_proxy_config(proxy)
 
 
 class TavilyBrowserRegister:

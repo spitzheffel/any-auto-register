@@ -164,7 +164,7 @@ class ChatGPTPlatform(BasePlatform):
                 headless=(ctx.executor_type == "headless"),
                 proxy=ctx.proxy,
                 otp_callback=artifacts.otp_callback,
-                phone_callback=artifacts.phone_callback,
+                phone=artifacts.phone,
                 log_fn=ctx.log,
             ),
             browser_register_runner=lambda worker, ctx, artifacts: worker.run(

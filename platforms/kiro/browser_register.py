@@ -15,7 +15,6 @@ import random
 import string
 import time
 from typing import Callable, Optional
-from urllib.parse import urlparse
 
 from camoufox.sync_api import Camoufox
 
@@ -25,17 +24,10 @@ AWS_PROFILE_DOMAIN = "profile.aws.amazon.com"
 
 
 def _build_proxy_config(proxy: Optional[str]) -> Optional[dict]:
-    if not proxy:
-        return None
-    parsed = urlparse(proxy)
-    if not parsed.scheme or not parsed.hostname or not parsed.port:
-        return {"server": proxy}
-    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
-    if parsed.username:
-        config["username"] = parsed.username
-    if parsed.password:
-        config["password"] = parsed.password
-    return config
+    # 代理 URL → Playwright 配置的拆分逻辑统一在 core.browser_engine，各平台不再各留一份
+    from core.browser_engine import build_proxy_config
+
+    return build_proxy_config(proxy)
 
 
 def _wait_for_url(page, substring: str, timeout: int = 60) -> bool:

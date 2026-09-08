@@ -7,9 +7,12 @@ import secrets
 import time
 import uuid
 from typing import Callable, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from camoufox.sync_api import Camoufox
+
+from core.errors import ResourceRejectedError
+from core.phone_verification import OUTCOME_SUCCESS
 
 from .constants import (
     OPENAI_AUTH,
@@ -516,17 +519,10 @@ def _select_phone_country_ui(page, dial_code: str, country_name: str, log) -> bo
 
 
 def _build_proxy_config(proxy: Optional[str]) -> Optional[dict]:
-    if not proxy:
-        return None
-    parsed = urlparse(proxy)
-    if not parsed.scheme or not parsed.hostname or not parsed.port:
-        return {"server": proxy}
-    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
-    if parsed.username:
-        config["username"] = parsed.username
-    if parsed.password:
-        config["password"] = parsed.password
-    return config
+    # 代理 URL → Playwright 配置的拆分逻辑统一在 core.browser_engine，各平台不再各留一份
+    from core.browser_engine import build_proxy_config
+
+    return build_proxy_config(proxy)
 
 
 def _wait_for_url(page, substring: str, timeout: int = 60) -> bool:
@@ -1700,7 +1696,7 @@ def _submit_login_email_via_page(page, email: str, log) -> dict:
     return {"ok": False, "status": 0, "url": last_url, "data": None, "text": "OAuth 邮箱页提交后未跳转"}
 
 
-def _do_codex_oauth(page, cookies_dict: dict, email: str, password: str, otp_callback, phone_callback, proxy: str | None, log) -> dict | None:
+def _do_codex_oauth(page, cookies_dict: dict, email: str, password: str, otp_callback, phone, proxy: str | None, log) -> dict | None:
     """在真实浏览器会话内完成 Codex OAuth，返回完整 token 包。"""
     from .oauth import generate_oauth_url
     from .constants import CODEX_CLIENT_ID, CODEX_REDIRECT_URI, CODEX_SCOPE
@@ -1810,11 +1806,11 @@ def _do_codex_oauth(page, cookies_dict: dict, email: str, password: str, otp_cal
                 return None
 
             if state["page_type"] == "add_phone":
-                if phone_callback:
+                if phone:
                     log("  OAuth 检测到 add_phone，优先执行短信验证...")
                     try:
                         _handle_add_phone_challenge(
-                            page, phone_callback,
+                            page, phone,
                             device_id=device_id, user_agent=user_agent,
                             log=log, resume_url=oauth_start.auth_url,
                         )
@@ -2030,7 +2026,7 @@ def _mask_phone_number(phone_number: str) -> str:
     return f"{text[:4]}****{text[-2:]}"
 
 
-class PhoneRejectedError(RuntimeError):
+class PhoneRejectedError(ResourceRejectedError):
     """目标站点拒收当前手机号，重试同一号码没有意义，必须换号。"""
 
 
@@ -2060,16 +2056,6 @@ def _is_phone_rejected_error(text: str) -> bool:
     return any(keyword in lowered for keyword in ("invalid", "not valid", "cannot", "can't", "unable"))
 
 
-def _reset_phone_callback_for_retry(phone_callback) -> None:
-    """作废当前号码并把 phone_callback 复位，使下一轮重新租号。"""
-    if hasattr(phone_callback, "cleanup"):
-        phone_callback.cleanup()
-    if hasattr(phone_callback, "phase"):
-        phone_callback.phase = "need_number"
-        phone_callback.activation = None
-        phone_callback.completed = False
-
-
 def _is_invalid_phone_otp_response(result: dict) -> bool:
     status = int((result or {}).get("status") or 0)
     if status != 400:
@@ -2087,7 +2073,7 @@ def _is_invalid_phone_otp_response(result: dict) -> bool:
 
 def _handle_add_phone_challenge(
     page,
-    phone_callback,
+    phone,
     *,
     device_id: str,
     user_agent: str,
@@ -2100,15 +2086,18 @@ def _handle_add_phone_challenge(
     流程: 选择国家 -> 输入本地号码 -> 点击发送 -> 填写 OTP -> 点击验证。
     如果验证码超时未收到，自动换号重试（最多 max_phone_attempts 次）。
     """
-    if not phone_callback:
+    if not phone:
         raise RuntimeError(
-            "ChatGPT 注册遇到手机号验证，但未配置 phone_callback。"
+            "ChatGPT 注册遇到手机号验证，但未配置接码渠道。"
             "请在 RegisterConfig.extra 中配置接码服务，或手动完成手机验证。"
         )
 
     last_error = None
+    lease = None
     for phone_attempt in range(max_phone_attempts):
-        if phone_attempt > 0:
+        if phone_attempt == 0:
+            lease = phone.acquire()
+        else:
             log(f"换号重试第 {phone_attempt + 1}/{max_phone_attempts} 次...")
             # 回到 add-phone 页面
             try:
@@ -2116,10 +2105,11 @@ def _handle_add_phone_challenge(
                 time.sleep(1)
             except Exception:
                 pass
+            lease = lease.swap()
 
         try:
             result = _do_add_phone_attempt(
-                page, phone_callback,
+                page, lease,
                 device_id=device_id, user_agent=user_agent,
                 log=log, resume_url=resume_url,
             )
@@ -2127,7 +2117,6 @@ def _handle_add_phone_challenge(
         except PhoneRejectedError as exc:
             last_error = exc
             log(f"⚠️ 号码被目标站点拒绝，准备换号重试: {str(exc)[:120]}")
-            _reset_phone_callback_for_retry(phone_callback)
         except RuntimeError as exc:
             last_error = exc
             error_msg = str(exc)
@@ -2141,14 +2130,13 @@ def _handle_add_phone_challenge(
             if not should_retry:
                 raise
             log(f"⚠️ 验证码超时未收到，准备换号重试...")
-            _reset_phone_callback_for_retry(phone_callback)
 
     raise last_error or RuntimeError("短信验证失败: 多次换号均未收到验证码")
 
 
 def _do_add_phone_attempt(
     page,
-    phone_callback,
+    lease,
     *,
     device_id: str,
     user_agent: str,
@@ -2188,12 +2176,11 @@ def _do_add_phone_attempt(
         else:
             log("  phone-otp/resend -> 页面未找到 Resend 按钮，跳过（浏览器模式不走 HTTP）")
 
-    if hasattr(phone_callback, "set_resend_callback"):
-        phone_callback.set_resend_callback(_request_openai_resend)
+    lease.set_resend_callback(_request_openai_resend)
 
     # ---- 第1步: 获取手机号 ----
     log("注册流程已进入 add_phone，开始准备租号并接收短信验证码...")
-    phone_number = str(phone_callback() or "").strip()
+    phone_number = str(lease.phone_number or "").strip()
     if not phone_number:
         raise RuntimeError("未获取到手机号")
     log(f"检测到 add_phone，提交手机号(UI): {_mask_phone_number(phone_number)}")
@@ -2307,19 +2294,17 @@ def _do_add_phone_attempt(
     # 检查发送是否成功（页面应出现 OTP 输入框或 URL 变化）
     error_text = _extract_auth_error_text(page)
     if error_text:
-        if hasattr(phone_callback, "mark_send_failed"):
-            phone_callback.mark_send_failed(error_text)
+        lease.report_send_failed(error_text)
         if _is_phone_rejected_error(error_text):
             raise PhoneRejectedError(f"手机号被拒绝: {error_text[:200]}")
         raise RuntimeError(f"手机号提交失败: {error_text[:200]}")
 
-    if hasattr(phone_callback, "mark_send_succeeded"):
-        phone_callback.mark_send_succeeded()
+    lease.report_send_succeeded()
     log("手机号提交成功(UI)，开始等待短信验证码...")
 
     # ---- 第5步: 等待 SMS 验证码并在页面 OTP 输入框中填写 ----
     for code_attempt in range(3):
-        sms_code = str(phone_callback() or "").strip()
+        sms_code = str(lease.wait_code() or "").strip()
         if not sms_code:
             raise RuntimeError("未获取到短信验证码")
 
@@ -2337,8 +2322,7 @@ def _do_add_phone_attempt(
         log(f"  phone-otp 页面提交状态: {otp_status}")
 
         if otp_resp.get("ok") or otp_status in (200, 201, 204):
-            if hasattr(phone_callback, "report_success"):
-                phone_callback.report_success()
+            lease.release(OUTCOME_SUCCESS)
             # 等待页面跳转
             time.sleep(1.5)
             state = _extract_flow_state(
@@ -2358,19 +2342,16 @@ def _do_add_phone_attempt(
         # 号码级拒绝要先判：这种情况下重发短信毫无意义，必须作废号码换新号
         if _is_phone_rejected_error(page_error):
             log(f"号码被 OpenAI 拒绝: {page_error[:120]}")
-            if hasattr(phone_callback, "mark_send_failed"):
-                phone_callback.mark_send_failed(page_error)
+            lease.report_send_failed(page_error)
             raise PhoneRejectedError(f"手机号被拒绝: {page_error[:200]}")
 
         # 检查是否是无效验证码
         if page_error and any(kw in page_error.lower() for kw in ("invalid", "incorrect", "wrong", "expired")):
             log(f"短信验证码被判定无效: {page_error[:100]}，继续等待下一条...")
-            if hasattr(phone_callback, "mark_code_failed"):
-                phone_callback.mark_code_failed(page_error or "invalid otp code")
+            lease.report_code_failed(page_error or "invalid otp code")
             continue
 
-        if hasattr(phone_callback, "mark_code_failed"):
-            phone_callback.mark_code_failed(page_error or f"status {otp_status}")
+        lease.report_code_failed(page_error or f"status {otp_status}")
         raise RuntimeError(f"短信验证码校验失败: {page_error[:200] if page_error else f'status {otp_status}'}")
 
     raise RuntimeError("短信验证码校验失败: 多次验证码均无效或未通过")
@@ -3724,7 +3705,7 @@ def _submit_about_you_via_page(page, log) -> dict:
     return {"ok": False, "status": 0, "url": last_url, "data": None, "text": "about_you 提交后未跳转"}
 
 
-def _browser_registration_flow(page, email: str, password: str, otp_callback, phone_callback, log) -> dict:
+def _browser_registration_flow(page, email: str, password: str, otp_callback, phone, log) -> dict:
     device_id = str(uuid.uuid4())
     try:
         user_agent = str(page.evaluate("() => navigator.userAgent") or "").strip() or _random_chrome_ua()
@@ -3835,12 +3816,12 @@ def _browser_registration_flow(page, email: str, password: str, otp_callback, ph
             if not state.get("page_type"):
                 state = _derive_registration_state_from_page(page)
             if _is_add_phone(state):
-                if not phone_callback:
+                if not phone:
                     return state
                 log("about_you 后进入 add_phone，尝试短信验证...")
                 state = _handle_add_phone_challenge(
                     page,
-                    phone_callback,
+                    phone,
                     device_id=device_id,
                     user_agent=user_agent,
                     log=log,
@@ -3849,12 +3830,12 @@ def _browser_registration_flow(page, email: str, password: str, otp_callback, ph
             continue
 
         if _is_add_phone(state):
-            if not phone_callback:
+            if not phone:
                 return state
             log("注册流程进入 add_phone，尝试短信验证...")
             state = _handle_add_phone_challenge(
                 page,
-                phone_callback,
+                phone,
                 device_id=device_id,
                 user_agent=user_agent,
                 log=log,
@@ -3882,13 +3863,13 @@ class ChatGPTBrowserRegister:
         headless: bool,
         proxy: Optional[str] = None,
         otp_callback: Optional[Callable[[], str]] = None,
-        phone_callback: Optional[Callable[[], str]] = None,
+        phone=None,
         log_fn: Callable[[str], None] = print,
     ):
         self.headless = headless
         self.proxy = proxy
         self.otp_callback = otp_callback
-        self.phone_callback = phone_callback
+        self.phone = phone
         self.log = log_fn
 
     def run(self, email: str, password: str) -> dict:
@@ -3906,7 +3887,7 @@ class ChatGPTBrowserRegister:
                 email,
                 password,
                 self.otp_callback,
-                self.phone_callback,
+                self.phone,
                 self.log,
             )
             self.log(f"注册流程完成: page={final_state.get('page_type') or '-'}")
@@ -3947,7 +3928,7 @@ class ChatGPTBrowserRegister:
                 self.log("  全新浏览器 OAuth 开始...")
                 result = _do_codex_oauth(
                     page, {}, email, password,
-                    self.otp_callback, self.phone_callback, self.proxy, self.log,
+                    self.otp_callback, self.phone, self.proxy, self.log,
                 )
                 return result
         except Exception as e:
