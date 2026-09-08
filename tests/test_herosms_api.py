@@ -12,7 +12,7 @@ def test_config_options_include_herosms_provider(client):
 
 
 def test_herosms_balance_endpoint_accepts_inline_api_key(client, monkeypatch):
-    monkeypatch.setattr("core.base_sms.HeroSmsProvider.get_balance", lambda self: 12.345)
+    monkeypatch.setattr("providers.sms.herosms.HeroSmsProvider.get_balance", lambda self: 12.345)
 
     resp = client.post("/api/sms/herosms/balance", json={"api_key": "hero123"})
 

@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from core.base_sms import HERO_SMS_DEFAULT_COUNTRY, HERO_SMS_DEFAULT_SERVICE, HeroSmsProvider, SmsBowerProvider
 from infrastructure.provider_settings_repository import ProviderSettingsRepository
+from providers.sms.herosms import HERO_SMS_DEFAULT_COUNTRY, HERO_SMS_DEFAULT_SERVICE, HeroSmsProvider
+from providers.sms.smsbower import SmsBowerProvider
 
 router = APIRouter(prefix="/sms", tags=["sms"])
 
