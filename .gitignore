@@ -78,6 +78,13 @@ AGENTS.md
 !.cursor/skills/platform-drift-check/
 !.cursor/skills/platform-from-capture/
 !.cursor/skills/failure-triage/
+# .agents 同理：trellis-* 由 trellis init 生成，和 .trellis/ 一起留在本地，
+# 只有四个领域 skill 入库（sync_skills.py 的镜像源就是这里）
+.agents/skills/*
+!.agents/skills/step-engine-conventions/
+!.agents/skills/platform-drift-check/
+!.agents/skills/platform-from-capture/
+!.agents/skills/failure-triage/
 docs/REFACTOR-PLAN.md
 
 # 敏感文件
