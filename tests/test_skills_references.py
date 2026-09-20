@@ -1,10 +1,12 @@
 """领域 skill 的防过期守卫。
 
-skill 里引用的仓库路径必须存在，`.cursor/skills` 镜像必须与 `.agents/skills` 一致。
-改名、删文件、忘了同步时这里会红，比靠人记住"顺手改 skill"可靠。
+skill 里引用的仓库路径必须存在、``path.py::Symbol`` 里的符号必须真的定义过，
+`.cursor/skills` 镜像必须与 `.agents/skills` 一致。改名、删文件、忘了同步时这里会红，
+比靠人记住"顺手改 skill"可靠。
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -22,12 +24,35 @@ _REPO_PATH = re.compile(
     r"`((?:core|application|api|platforms|providers|tests|infrastructure|services|scripts|docs|frontend/src|data)"
     r"/[\w./-]+?)(?:::[\w.]+)?`"
 )
+# 反引号里形如 `core/xxx.py::Symbol` 的符号引用
+_REPO_SYMBOL = re.compile(
+    r"`((?:core|application|api|platforms|providers|tests|infrastructure|services|scripts)"
+    r"/[\w./-]+\.py)::([\w.]+)`"
+)
 _PLACEHOLDER = re.compile(r"[<>{}*]")
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 
 
 def _skill_files() -> list[Path]:
     return [sync_skills.SOURCE / name / "SKILL.md" for name in sync_skills.DOMAIN_SKILLS]
+
+
+def _defined_names(path: Path) -> set[str]:
+    """文件里定义过的名字：类、函数、赋值目标、参数。
+
+    走 ``ast.walk`` 而不是只看顶层——skill 引用的常常是类里的方法
+    （``core/base_platform.py::register``）或测试里的嵌套辅助
+    （``tests/test_step_flow_wiring.py::lock_is_free_from_another_thread``）。
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+    return names
 
 
 @pytest.mark.parametrize("skill_file", _skill_files(), ids=lambda p: p.parent.name)
@@ -56,6 +81,27 @@ def test_referenced_repo_paths_exist(skill_file: Path):
         if not (ROOT / candidate).exists():
             missing.append(candidate)
     assert not missing, f"{skill_file.parent.name} 引用了不存在的路径: {missing}"
+
+
+@pytest.mark.parametrize("skill_file", _skill_files(), ids=lambda p: p.parent.name)
+def test_referenced_symbols_exist(skill_file: Path):
+    """``path.py::Symbol`` 里的符号必须真的在那个文件里定义过。
+
+    只验路径是不够的：把 CAPABILITY_CHANNEL 改个名、把 ScriptedPage 删掉，
+    文件照样在，skill 却已经指不到东西了。
+    """
+    text = skill_file.read_text(encoding="utf-8")
+    missing: list[str] = []
+    for raw_path, symbol in _REPO_SYMBOL.findall(text):
+        if _PLACEHOLDER.search(raw_path) or _PLACEHOLDER.search(symbol):
+            continue
+        target = ROOT / raw_path
+        if not target.exists():
+            continue  # 路径不存在由 test_referenced_repo_paths_exist 负责报
+        # A.b 这种写成"类.方法"的引用只校验第一段，够抓住改名与删除
+        if symbol.split(".")[0] not in _defined_names(target):
+            missing.append(f"{raw_path}::{symbol}")
+    assert not missing, f"{skill_file.parent.name} 引用了不存在的符号: {missing}"
 
 
 def test_domain_skills_reference_the_conventions_base():

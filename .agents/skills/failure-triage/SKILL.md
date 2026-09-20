@@ -19,7 +19,20 @@ curl -s http://127.0.0.1:8000/api/tasks/<task_id>/events?limit=500
 
 （端口与鉴权以本地 `main.py` / `.env` 为准；有 `APP_PASSWORD` 时带 Bearer。）
 
-事件的 `type` 就是引擎的结构化事件：`step_started` / `step_ok` / `step_failed` / `step_retry` / `step_rewind` / `step_skipped` / `obstacle_detected` / `obstacle_resolved` / `obstacle_unresolved` / `obstacle_failed` / `compensate_failed` / `checkpoint_failed` / `waiting_human`。`detail.step` 与 `detail.attempt_id` 标出属于哪次尝试的哪一步。
+事件的 `type` 就是引擎的结构化事件，`detail.step` 与 `detail.attempt_id` 标出属于哪次尝试的哪一步：
+
+- 步骤：`step_started` / `step_ok` / `step_failed` / `step_retry` / `step_rewind` / `step_skipped`
+- 干扰：`obstacle_detected` / `obstacle_resolved` / `obstacle_unresolved` / `obstacle_failed` / `obstacle_detect_failed`
+- 辅助浏览器：`aux_browser_opened` / `aux_browser_closed`（某步开了第二个会话，现场包里会多出 `screenshot-<name>.png`）
+- 其它：`compensate_failed` / `checkpoint_failed` / `waiting_human`
+
+这份清单会随引擎增补，**以代码为准**：
+
+```bash
+grep -rn 'emit(' core/registration/steps.py core/registration/obstacles.py
+```
+
+看到清单外的 type 先去对一遍代码再怀疑接线。
 
 如果时间线里**只有纯文本、没有这些 type**，先怀疑日志接线（`StepContext._log_fn` 没拿到 `runtime.log`），这是比业务失败更优先的问题。
 

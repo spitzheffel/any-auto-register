@@ -21,8 +21,21 @@ description: "Conventions for the registration Step engine, PhoneLease, channel 
 - 干扰处理：`core/registration/obstacles.py`（通用 Turnstile / 全页拦截），平台装配见 `platforms/cursor/obstacles.py`
 - 公共页面辅助：`core/registration/dom.py`（选择器轮询、cookie 等待、CF 全页拦截、Turnstile 点击与注入）——平台的 `dom.py` 只留站点特有常量
 - 可取消等待：`core/cancellation.py`（`cancellable_sleep` / `poll_until` / `accepts_should_stop`）
-- 参考实现：`platforms/cursor/steps.py`、`platforms/cursor/plugin.py`、`platforms/cursor/dom.py`、`platforms/cursor/drift.py`
-- 第二份参考（页面顺序由服务端决定、需要第二个浏览器会话）：`platforms/chatgpt/steps.py`、`platforms/chatgpt/obstacles.py`
+
+## 按模式找参考（8 个平台都在引擎上，挑最像你手头那个的读）
+
+| 要解决的问题 | 读哪个 |
+|---|---|
+| 完整的一份（手机验证 + 两个 ObstacleHandler + 协议路径对照） | `platforms/cursor/` |
+| 最小的一份（一个 dom.py + 一个 steps.py，五六步） | `platforms/grok/`、`platforms/trae/` |
+| 页面顺序由服务端决定（同一个 Step 挂两次，靠 `when()` 认领） | `platforms/chatgpt/steps.py` |
+| 需要第二个浏览器会话（注册完的上下文做 OAuth 会被断） | `platforms/chatgpt/steps.py` 的 `CodexOAuth` |
+| 结果只在网络响应里、DOM 上读不到 | `platforms/windsurf/steps.py`、`platforms/trae/steps.py` |
+| 站点是 hash 驱动的多步 SPA | `platforms/kiro/steps.py` |
+| captcha 是表单的必填字段，不是偶发干扰 | `platforms/tavily/steps.py` |
+| Cloudflare 全页拦截 + Turnstile 的 handler 装配 | `platforms/openblocklabs/obstacles.py`、`platforms/cursor/obstacles.py` |
+| 同时要 `otp` 和 `link` 两个邮件能力 | `platforms/tavily/steps.py` |
+| 允许内核回退到 Chromium（少见，只有这个） | `platforms/windsurf/plugin.py` |
 
 ## 运行时原语（步骤里一律用这几个）
 
@@ -34,7 +47,8 @@ description: "Conventions for the registration Step engine, PhoneLease, channel 
 
 - `reads` / `writes` 只到键名。`Flow` 构建期校验"读的键要有来源"，运行期校验"声明写的键真的写了"。`initial_keys` 默认是 `email` / `password`（见 `run_step_flow` 的初始 state）。
 - 只有能"从零建立页面状态"的步骤才 `anchor = True`（Cursor 里只有 `OpenSignupPage`）。回撤目标必须是 anchor，否则是契约错误。
-- 可选阶段用 `when()` 守卫返回 False 跳过；`core/requirements.py::from_step_flow` 会把带 `when` 的步骤依赖推导成 conditional 渠道。
+- 可选阶段用 `when()` 守卫返回 False 跳过；`core/requirements.py::from_step_flow` 按"**有没有重写 `when()`**"判定可选阶段，重写了就把该步骤的 `requires` 从 required 降成 conditional。
+- **这条推导很容易被误用**：只要给步骤加了守卫，它依赖的渠道在前端就不再是必配项。如果那个渠道其实每次都要（新账号注册的邮箱验证码就是），把"这一次可能不跑"写成 `run()` 里的 `StepResult.skip(...)`，不要写成 `when()`——两者对引擎等价，对渠道推导不等价。`platforms/kiro/steps.py::AwsVerifyEmail` 是这个写法并在 docstring 里写明了原因。改完用本文末尾的 `describe_requirements` 命令核对，不要靠看代码推。
 - `requires` 写能力名（`phone` / `otp` / `link` / `captcha`），不是渠道名；步骤里用 `sc.require("phone")` 取实例。
 - 失败一律抛 `core/errors.py` 里的分类异常。未分类的 `RuntimeError` = `unknown`，既不原地重试也不补投，只会占掉一个名额——这几乎总是错的。
 - 步骤自己 `retry` 只在默认表不合适时声明（例：`MaybePhoneVerify` 只对 `resource_rejected` 原地重试，因为等不到码时页面已经不在原处）。
