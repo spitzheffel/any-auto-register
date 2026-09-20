@@ -368,7 +368,7 @@ class MyPlatform(BasePlatform):
         )
 ```
 
-The system scans `platforms/*/plugin.py` at startup and auto-loads anything registered via `@register`; the executors / identity modes declared on the class are seeded into the platform capability table automatically. Browser registration is driven by the Step engine in `core/registration/steps.py` (retries, rewinds, compensation, checkpoints, failure artifacts and human-in-the-loop all live in the engine) — a platform only writes its steps. For the protocol path see `platforms/cursor/core.py`.
+The system scans `platforms/*/plugin.py` at startup and auto-loads anything registered via `@register`; the executors / identity modes declared on the class are seeded into the platform capability table automatically. New browser paths should run on the Step engine in `core/registration/steps.py` (retries, rewinds, compensation, checkpoints, failure artifacts and human-in-the-loop all live in the engine) — a platform only writes its steps; see `platforms/cursor/` and `platforms/chatgpt/` (the most complete), or `platforms/grok/` and `platforms/trae/` (the two smallest). All eight platforms with a browser path are on the engine; the legacy `browser_worker_builder` field stays on the adapter for out-of-tree plugins. For the protocol path see `platforms/cursor/core.py`.
 
 Conventions plus the workflows for scaffolding a platform from a captured session, checking for site drift and triaging failures live in the four skills under `.agents/skills/` (`step-engine-conventions`, `platform-from-capture`, `platform-drift-check`, `failure-triage`). Channel requirements are derived with `PlatformsService().describe_requirements(...)` instead of being written by hand.
 

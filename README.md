@@ -372,7 +372,7 @@ class MyPlatform(BasePlatform):
         )
 ```
 
-系统启动时扫描 `platforms/*/plugin.py` 自动加载 `@register` 注册的插件;类属性里的执行器 / 身份模式会自动种入平台能力表。浏览器路径的注册流程由 `core/registration/steps.py` 的 Step 引擎驱动(重试、回撤、补偿、检查点、失败现场、人工介入都在引擎里),平台只写步骤;协议路径见 `platforms/cursor/core.py`。
+系统启动时扫描 `platforms/*/plugin.py` 自动加载 `@register` 注册的插件;类属性里的执行器 / 身份模式会自动种入平台能力表。新平台的浏览器路径应接 `core/registration/steps.py` 的 Step 引擎(重试、回撤、补偿、检查点、失败现场、人工介入都在引擎里),平台只写步骤——参考 `platforms/cursor/` 与 `platforms/chatgpt/`(最完整),或 `platforms/grok/`、`platforms/trae/`(最小的两个)。8 个有浏览器路径的平台已全部接入;适配器上的 `browser_worker_builder` 老路径保留给仓库外的插件。协议路径见 `platforms/cursor/core.py`。
 
 约定、从抓包会话搭平台、站点漂移检查、失败排查的操作流程见 `.agents/skills/` 下的四个 skill(`step-engine-conventions`、`platform-from-capture`、`platform-drift-check`、`failure-triage`);渠道需求可用 `PlatformsService().describe_requirements(...)` 推导,不必手写。
 

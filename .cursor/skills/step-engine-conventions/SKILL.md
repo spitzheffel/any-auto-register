@@ -19,7 +19,16 @@ description: "Conventions for the registration Step engine, PhoneLease, channel 
 - 检查点与脱敏：`core/checkpoints.py`，`SENSITIVE_KEYS` 在 `core/registration/steps.py`
 - 能力名 ↔ 渠道名：`core/requirements.py::CAPABILITY_CHANNEL`（唯一一份映射）
 - 干扰处理：`core/registration/obstacles.py`（通用 Turnstile / 全页拦截），平台装配见 `platforms/cursor/obstacles.py`
+- 公共页面辅助：`core/registration/dom.py`（选择器轮询、cookie 等待、CF 全页拦截、Turnstile 点击与注入）——平台的 `dom.py` 只留站点特有常量
+- 可取消等待：`core/cancellation.py`（`cancellable_sleep` / `poll_until` / `accepts_should_stop`）
 - 参考实现：`platforms/cursor/steps.py`、`platforms/cursor/plugin.py`、`platforms/cursor/dom.py`、`platforms/cursor/drift.py`
+- 第二份参考（页面顺序由服务端决定、需要第二个浏览器会话）：`platforms/chatgpt/steps.py`、`platforms/chatgpt/obstacles.py`
+
+## 运行时原语（步骤里一律用这几个）
+
+- 等待：`sc.sleep` / `sc.poll` / `sc.wait_for_selector` / `sc.wait_for_url`。引擎只在**步骤之间**查取消令牌，步骤内部裸写 `time.sleep` / `while True` 等于把取消延迟拉到整步长度。
+- 回调：`sc.call_with_cancel(fn)`——按签名判断后才注入 `should_stop`，不接的实现照旧跑满自己的 timeout。
+- 辅助浏览器：`sc.open_aux_browser(name)` / `sc.close_aux_browser(name)`。按主会话的引擎 / 代理 / 无头设置另开一个隔离会话（典型是"注册完的上下文做 OAuth 会被断"）。**成功时自己关，失败时交给 `compensate()` 关**：引擎是先采集现场再补偿的，提前关掉现场包里就只剩一张空白截图。
 
 ## 步骤契约
 

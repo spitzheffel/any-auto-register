@@ -368,7 +368,7 @@ class MyPlatform(BasePlatform):
         )
 ```
 
-Hệ thống quét `platforms/*/plugin.py` khi khởi động và auto-load mọi thứ đăng ký qua `@register`; executors / identity modes khai báo trên class được seed tự động vào bảng platform capability. Đăng ký qua browser do Step engine trong `core/registration/steps.py` điều khiển (retry, rewind, compensation, checkpoint, failure artifacts, human-in-the-loop đều nằm trong engine) — platform chỉ viết các step. Protocol path xem `platforms/cursor/core.py`.
+Hệ thống quét `platforms/*/plugin.py` khi khởi động và auto-load mọi thứ đăng ký qua `@register`; executors / identity modes khai báo trên class được seed tự động vào bảng platform capability. Đăng ký qua browser cho platform mới nên chạy trên Step engine trong `core/registration/steps.py` (retry, rewind, compensation, checkpoint, failure artifacts, human-in-the-loop đều nằm trong engine) — platform chỉ viết các step; xem `platforms/cursor/` và `platforms/chatgpt/` (đầy đủ nhất), hoặc `platforms/grok/` và `platforms/trae/` (hai cái nhỏ nhất). Cả 8 platform có browser path đều đã chạy trên engine; field cũ `browser_worker_builder` giữ lại trên adapter cho plugin ngoài repo. Protocol path xem `platforms/cursor/core.py`.
 
 Quy ước và quy trình (scaffold platform từ session đã capture, kiểm tra site drift, triage lỗi) nằm trong bốn skill dưới `.agents/skills/` (`step-engine-conventions`, `platform-from-capture`, `platform-drift-check`, `failure-triage`). Yêu cầu channel được suy ra bằng `PlatformsService().describe_requirements(...)`, không viết tay.
 
