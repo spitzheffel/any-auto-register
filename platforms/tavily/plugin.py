@@ -6,6 +6,12 @@ from core.registration import BrowserRegistrationAdapter, LinkSpec, OtpSpec, Pro
 from core.registry import register
 
 
+def _build_flow():
+    from platforms.tavily.steps import build_flow
+
+    return build_flow()
+
+
 @register
 class TavilyPlatform(BasePlatform):
     name = "tavily"
@@ -50,19 +56,11 @@ class TavilyPlatform(BasePlatform):
     def build_browser_registration_adapter(self):
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_tavily_result(result),
-            browser_worker_builder=lambda ctx, artifacts: __import__("platforms.tavily.browser_register", fromlist=["TavilyBrowserRegister"]).TavilyBrowserRegister(
-                captcha=artifacts.captcha_solver if ctx.identity.identity_provider == "mailbox" else None,
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                verification_link_callback=artifacts.verification_link_callback,
-                api_key_timeout=int(ctx.extra.get("api_key_timeout", 20) or 20),
-                log_fn=ctx.log,
-            ),
-            browser_register_runner=lambda worker, ctx, artifacts: worker.run(
-                email=ctx.identity.email,
-                password=ctx.password,
-            ),
+            step_flow_builder=_build_flow,
+            # Auth0 托管页的 Turnstile 靠打码渠道过，指纹也得像人；
+            # 退回普通 Chromium 只会让挑战更难过，所以不允许回退
+            engine_preference="camoufox",
+            allow_engine_fallback=False,
             oauth_runner=self._run_browser_oauth,
             capability=RegistrationCapability(oauth_allowed_executor_types=("headed",)),
             otp_spec=OtpSpec(wait_message="等待验证码邮件..."),

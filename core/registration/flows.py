@@ -18,7 +18,7 @@ from .models import RegistrationArtifacts, RegistrationContext, RegistrationResu
 
 def run_step_flow(ctx: RegistrationContext, adapter: BrowserRegistrationAdapter) -> dict:
     """走 Step 引擎的浏览器注册：浏览器会话由这里开、由这里关。"""
-    from core.browser_engine import start_browser
+    from core.browser_engine import BrowserLaunchSpec
     from core.registration.runtime import StepRuntime
     from core.registration.steps import (
         ArtifactCollector,
@@ -39,13 +39,17 @@ def run_step_flow(ctx: RegistrationContext, adapter: BrowserRegistrationAdapter)
     if runtime.artifact_root:
         artifacts = ArtifactCollector(f"{runtime.artifact_root}/{attempt_id}", network=NetworkRecorder())
 
-    with start_browser(
+    # 记下启动参数：步骤要再开隔离会话时（sc.open_aux_browser）照这一份开
+    launch_spec = BrowserLaunchSpec(
         engine=adapter.engine_preference or str(ctx.extra.get("browser_engine") or ""),
         headless=(ctx.executor_type != "headed"),
         proxy=ctx.proxy,
         log_fn=ctx.log,
         allow_fallback=adapter.allow_engine_fallback,
-    ) as session:
+        options=dict(adapter.engine_options or {}),
+    )
+
+    with launch_spec.start() as session:
         page = session.new_page()
         if artifacts is not None:
             artifacts.attach(page)
@@ -60,6 +64,7 @@ def run_step_flow(ctx: RegistrationContext, adapter: BrowserRegistrationAdapter)
             human=runtime.human,
             state={"email": ctx.identity.email or "", "password": ctx.password or ""},
             attempt_id=attempt_id,
+            launch_spec=launch_spec,
         )
         sc.handles["browser_session"] = session
 
@@ -75,6 +80,8 @@ def run_step_flow(ctx: RegistrationContext, adapter: BrowserRegistrationAdapter)
         finally:
             # 实际命中的渠道回写给任务层（统计与账号元数据要用）
             runtime.channels_used.update(sc.resolver.channels_used)
+            # 补偿没跑到（例如下一步直接抛 StepContractError）时，辅助浏览器在这里兜底关
+            sc.close_aux_browsers()
             # 失败 / 取消时仍持有的租约与会话在这里兜底关闭
             sc.resolver.close_all()
 

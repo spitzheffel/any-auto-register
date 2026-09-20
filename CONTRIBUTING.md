@@ -38,7 +38,7 @@ pytest tests/test_api_health.py -v
 1. 在 `platforms/` 下新建目录
 2. 实现 `plugin.py`（继承 `BasePlatform`，用 `@register` 装饰器注册）
 3. 实现 `protocol_mailbox.py`（协议模式注册逻辑）
-4. 可选：实现 `browser_register.py` 和 `browser_oauth.py`
+4. 可选：浏览器路径实现 `steps.py` / `dom.py` / `obstacles.py`（Step 引擎）与 `browser_oauth.py`
 5. 在 `resources/platform_capabilities.json` 中添加平台能力声明
 6. 添加对应的测试
 

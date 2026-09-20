@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 
 from core.oauth_browser import OAUTH_PROVIDER_LABELS, OAuthBrowser, finalize_oauth_email
-from platforms.tavily.browser_register import (
+from platforms.tavily.dom import (
     click_oauth_provider,
     close_marketing_dialog,
     extract_signup_url,

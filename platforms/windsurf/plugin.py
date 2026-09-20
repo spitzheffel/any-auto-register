@@ -24,12 +24,17 @@ def _status_from_overview(overview: dict) -> AccountStatus:
     return AccountStatus.REGISTERED
 
 
+def _build_flow():
+    from platforms.windsurf.steps import build_flow
+
+    return build_flow()
+
+
+#: 姓名生成搬到 dom.py（浏览器路径的步骤也要用），这里保留旧名字给协议路径
 def _default_name(email: str) -> str:
-    local = (email or "").split("@", 1)[0].strip()
-    cleaned = "".join(ch if ch.isalpha() else " " for ch in local).strip()
-    if cleaned:
-        return " ".join(part.capitalize() for part in cleaned.split()[:2])
-    return "Windsurf User"
+    from platforms.windsurf.dom import default_name
+
+    return default_name(email)
 
 
 @register
@@ -119,27 +124,13 @@ class WindsurfPlatform(BasePlatform):
         )
 
     def build_browser_registration_adapter(self):
-        def _build_worker(ctx, artifacts):
-            from platforms.windsurf.browser_register import WindsurfBrowserRegister
-
-            return WindsurfBrowserRegister(
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                log_fn=ctx.log,
-            )
-
-        def _run_worker(worker, ctx, artifacts):
-            return worker.run(
-                email=ctx.identity.email,
-                password=ctx.password or "",
-                name=str(ctx.extra.get("name") or _default_name(ctx.identity.email)),
-            )
-
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_windsurf_result(result),
-            browser_worker_builder=_build_worker,
-            browser_register_runner=_run_worker,
+            step_flow_builder=_build_flow,
+            # 四个平台里只有 Windsurf 开回退：旧实现本来就是
+            # "先试 Camoufox，抛异常再退回 Playwright Chromium"，两种内核都跑得通
+            engine_preference="camoufox",
+            allow_engine_fallback=True,
             otp_spec=OtpSpec(
                 keyword="Windsurf",
                 code_pattern=r"\b(\d{6})\b",

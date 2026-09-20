@@ -24,6 +24,12 @@ def _kiro_local_matches_target(current: dict, access_token: str, refresh_token: 
     return False
 
 
+def _build_flow():
+    from platforms.kiro.steps import build_flow
+
+    return build_flow()
+
+
 @register
 class KiroPlatform(BasePlatform):
     name = "kiro"
@@ -82,16 +88,11 @@ class KiroPlatform(BasePlatform):
     def build_browser_registration_adapter(self):
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_kiro_result(result, oauth_provider=ctx.identity.oauth_provider),
-            browser_worker_builder=lambda ctx, artifacts: __import__("platforms.kiro.browser_register", fromlist=["KiroBrowserRegister"]).KiroBrowserRegister(
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                log_fn=ctx.log,
-            ),
-            browser_register_runner=lambda worker, ctx, artifacts: worker.run(
-                email=ctx.identity.email or "",
-                password=ctx.password or "",
-            ),
+            step_flow_builder=_build_flow,
+            # AWS Builder ID 的注册 SPA 对指纹敏感，回退到普通 Chromium 会稳定
+            # 卡在挑战页；Kiro / AWS 都没有 Cloudflare 全页拦截，不挂 obstacle handler
+            engine_preference="camoufox",
+            allow_engine_fallback=False,
             oauth_runner=self._run_protocol_oauth,
             capability=RegistrationCapability(oauth_headless_requires_browser_reuse=True),
             otp_spec=OtpSpec(wait_message="等待验证码..."),

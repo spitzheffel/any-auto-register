@@ -71,3 +71,45 @@ description: "Scaffold a new registration platform (browser Step flow and/or pro
 - ProtocolSpec 的 `reproduction.code` 是通用 requests 脚本，只能当参考，不要直接放进仓库。
 - 交互记录看不到跨域 iframe 内的操作（Turnstile 里的点击），只能从网络侧看到挑战出现的时机——按"挑战出现"处理即可。
 - `flows` 里的顺序是这次录制的顺序，可选分支（手机验证）不一定出现；步骤要用 `when()` 表达"可能出现"。
+
+---
+
+## 迁移一个旧平台（整段式 → Step）
+
+仓库里 8 个有浏览器路径的平台已全部迁完，这一节留给外部插件和以后新接的老代码。
+`platforms/chatgpt/` 是最大的一例（3936 行的 `browser_register.py`），按这个顺序做，
+每一步都能单独跑绿、单独提交。平台只有一两百行时（`platforms/grok/`、`platforms/trae/`
+就是这一档）第 1、2 步并成一步做即可，直接照着 `dom.py` + `steps.py` 两件套写：
+
+1. **删死代码**。先用可达性分析算出哪些顶层定义从入口类不可达（`ast` 扫一遍建调用图即可），
+   别凭印象删。注意“活函数里的死块”（算了却没人读的局部变量）分析看不到，删掉它们后要再跑一遍取不动点。
+2. **纯搬运拆模块**：`dom.py`（选择器 + 逐页动作）、大块页面逻辑各自成模块。
+   这一步**不改任何测试**——测试一行不改还全绿，就是“零行为变化”的证明。
+   旧 worker 暂时保留，并再导出测试打补丁用的名字。
+3. **类型化错误 + 取消穿透**。这是增量的：`RegistrationFailure` 继承 `RuntimeError`，
+   所以旧路径的 `except RuntimeError` 仍然接得住，两边同时可跑。
+4. **写 `steps.py` / `obstacles.py`，切 `plugin.py`**。切换点就一个字段，回滚 = 改回去。
+5. **删旧文件，重写钉它内部名字的测试，补 `drift.py` 与文档**。
+   旧文件里如果还混着别的功能（`platforms/windsurf/browser_register.py` 里有 800 行
+   Stripe / 支付宝结账），只搬注册那一段，文件留着。
+
+迁移途中几条反复踩到的：
+
+- **`requires` 的渠道级别由"有没有重写 `when()`"决定**（`core/requirements.py:60`）。
+  按页面阶段做守卫的步骤会把渠道从 required 降成 conditional——如果那个渠道其实每次
+  都要（新账号注册的邮箱验证码就是），把"这次可能不跑"写成 `run()` 里的
+  `StepResult.skip()`，别写成 `when()`。`platforms/kiro/steps.py::AwsVerifyEmail` 是这个写法。
+- **OTP 步骤用 `RetryPolicy(max_attempts=1)`**。原地重试会再向邮箱要一封**新**邮件，
+  站点却只发过一封，结果是白等满一个 OTP 超时。让这次尝试结束，由任务层换邮箱补投。
+- **手写的"重试 N 次"循环就是 `RetryPolicy`**，"睡 5 秒再来一次"就是 `backoff_seconds`。
+  要在最后一次给出不同的错误分类（比如"这个邮箱域名被拒了"），把次数记在黑板上
+  （只声明 `writes`，`Flow.validate` 不允许 `reads` 里出现本步骤自己才写的键）。
+- **`compensate()` 里抛的异常会被引擎吞掉**（只 emit 一条 warning），别指望它能改变失败分类。
+- **`page.on("response")` 这类监听挂在锚点步骤**，用 `sc.handles` 里的键做幂等标记，
+  回撤重跑时清空已捕获的内容而不是重复挂。`platforms/trae/steps.py`、
+  `platforms/windsurf/steps.py` 是这个写法。
+
+
+常见坑：旧实现的重试循环、“卡住”计数器、`except Exception: return None`
+都要**删掉**而不是搬进 Step：它们分别对应 `RetryPolicy`、回撤预算、错误分类，
+搬过去就是两套机制打架。

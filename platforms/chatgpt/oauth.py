@@ -245,7 +245,8 @@ def submit_callback_url(
     redirect_uri: str = OAUTH_REDIRECT_URI,
     client_id: str = OAUTH_CLIENT_ID,
     token_url: str = OAUTH_TOKEN_URL,
-    proxy_url: Optional[str] = None
+    proxy_url: Optional[str] = None,
+    verify_state: bool = True,
 ) -> str:
     """
     处理 OAuth 回调 URL，获取访问令牌
@@ -258,6 +259,9 @@ def submit_callback_url(
         client_id: OpenAI Client ID
         token_url: Token 交换地址
         proxy_url: 代理 URL
+        verify_state: 是否校验 state。浏览器里跟到的 callback 有时丢了 state
+            （站点自己重定向过一手），但 URL 确实是我们的 redirect_uri，
+            这时按 False 调一次；仍然要求有 code。
 
     Returns:
         包含访问令牌等信息的 JSON 字符串
@@ -273,10 +277,11 @@ def submit_callback_url(
 
     if not cb["code"]:
         raise ValueError("callback url missing ?code=")
-    if not cb["state"]:
-        raise ValueError("callback url missing ?state=")
-    if cb["state"] != expected_state:
-        raise ValueError("state mismatch")
+    if verify_state:
+        if not cb["state"]:
+            raise ValueError("callback url missing ?state=")
+        if cb["state"] != expected_state:
+            raise ValueError("state mismatch")
 
     token_resp = _post_form(
         token_url,

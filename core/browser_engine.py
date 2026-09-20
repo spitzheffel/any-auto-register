@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
@@ -280,6 +280,34 @@ def start_browser(
         log_fn=log_fn,
         **extra,
     )
+
+
+@dataclass(frozen=True)
+class BrowserLaunchSpec:
+    """一次尝试里复用的浏览器启动参数。
+
+    ``run_step_flow`` 开主会话时把参数记下来，步骤想再开一个隔离会话时
+    （典型是 ChatGPT 注册完必须换干净上下文做 Codex OAuth）按同样的引擎 /
+    代理 / 无头设置开，不用把这堆参数再往下穿一遍。
+    """
+
+    engine: str = ""
+    headless: bool = True
+    proxy: Optional[str] = None
+    log_fn: Callable[[str], None] = print
+    allow_fallback: bool = True
+    #: 引擎特有的额外参数（例如 camoufox 的 geoip）
+    options: dict = field(default_factory=dict)
+
+    def start(self) -> BrowserSession:
+        return start_browser(
+            engine=self.engine,
+            headless=self.headless,
+            proxy=self.proxy,
+            log_fn=self.log_fn,
+            allow_fallback=self.allow_fallback,
+            **self.options,
+        )
 
 
 # ---------------------------------------------------------------------------

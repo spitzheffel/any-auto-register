@@ -6,6 +6,18 @@ from core.registration.helpers import resolve_timeout
 from core.registry import register
 
 
+def _build_flow():
+    from platforms.grok.steps import build_flow
+
+    return build_flow()
+
+
+def _build_obstacles():
+    from platforms.grok.obstacles import build_obstacles
+
+    return build_obstacles()
+
+
 @register
 class GrokPlatform(BasePlatform):
     name = "grok"
@@ -52,16 +64,12 @@ class GrokPlatform(BasePlatform):
     def build_browser_registration_adapter(self):
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_grok_result(result),
-            browser_worker_builder=lambda ctx, artifacts: __import__("platforms.grok.browser_register", fromlist=["GrokBrowserRegister"]).GrokBrowserRegister(
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                log_fn=ctx.log,
-            ),
-            browser_register_runner=lambda worker, ctx, artifacts: worker.run(
-                email=ctx.identity.email or "",
-                password=ctx.password or "",
-            ),
+            step_flow_builder=_build_flow,
+            obstacle_builder=_build_obstacles,
+            # accounts.x.ai 的 Turnstile 靠 Camoufox 的指纹自己过，
+            # 回退到普通 Chromium 只会稳定卡在挑战页，所以不允许回退
+            engine_preference="camoufox",
+            allow_engine_fallback=False,
             oauth_runner=self._run_protocol_oauth,
             capability=RegistrationCapability(oauth_allowed_executor_types=("headed",)),
             otp_spec=OtpSpec(wait_message="等待验证码...", code_pattern=r"[A-Z0-9]{3}-[A-Z0-9]{3}"),

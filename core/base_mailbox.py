@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlparse
 
 logger = logging.getLogger(__name__)
 
+from core.cancellation import accepts_should_stop
 from core.errors import AttemptCancelled, TransientError
 from core.tls import insecure_request, mark_session_insecure, suppress_insecure_request_warning
 
@@ -39,19 +40,6 @@ class MailboxAccount:
     email: str
     account_id: str = ""
     extra: dict = None  # 平台额外信息
-
-
-def accepts_should_stop(method) -> bool:
-    """判断某个等待方法是否接受 should_stop（未接入的实现退化为跑满 timeout）。"""
-    import inspect
-
-    try:
-        params = inspect.signature(method).parameters
-    except (TypeError, ValueError):
-        return False
-    if "should_stop" in params:
-        return True
-    return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
 
 
 ShouldStop = Callable[[], bool] | None

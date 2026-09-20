@@ -154,3 +154,105 @@ class TestCli:
         har, _ = capture
         with pytest.raises(SystemExit, match="drift 声明"):
             drift.run("nonexistent_platform", har, None)
+
+
+class TestChatGPTSurface:
+    def test_loads_without_a_server_action_layer(self):
+        """ChatGPT 不是 Next.js server-action 站点，没有 action id 这一层。
+
+        没有并不代表不能做漂移检查：端点与选择器两项照常跑。
+        """
+        import importlib
+
+        surface = importlib.import_module("platforms.chatgpt.drift")
+        assert surface.known_actions() == {}
+        assert surface.action_cache_path() is None
+        assert drift.check_action_ids([], surface)["observed"] == []
+        assert surface.EXPECTED_ENDPOINTS and surface.SELECTORS_BY_STAGE
+
+    def test_selectors_come_from_the_live_modules(self):
+        """声明必须是 import 来的，不能是手抄的副本。
+
+        手抄的话，检查通过只能说明两份抄写一致。
+        """
+        import importlib
+
+        surface = importlib.import_module("platforms.chatgpt.drift")
+        dom = importlib.import_module("platforms.chatgpt.dom")
+        assert surface.SELECTORS_BY_STAGE["otp"] == tuple(dom.OTP_INPUT_SELECTORS[:4])
+        assert surface.SELECTORS_BY_STAGE["email"] == tuple(dom.EMAIL_INPUT_SELECTORS[:4])
+
+
+#: 所有走 Step 引擎的平台都必须有一份能被脚本读懂的漂移面
+STEP_PLATFORMS = ["cursor", "chatgpt", "grok", "trae", "kiro", "tavily", "openblocklabs", "windsurf"]
+#: 选择器按列表声明（另外几个按站点结构分组，字段名不统一）
+LIST_SELECTOR_PLATFORMS = ["grok", "trae", "kiro", "openblocklabs"]
+
+
+class TestStepPlatformSurfaces:
+    """迁到 Step 引擎的平台：漂移面要真的接得上脚本，而不是只存在。"""
+
+    @pytest.mark.parametrize("platform", STEP_PLATFORMS)
+    def test_surface_loads_and_the_script_can_read_it(self, platform):
+        import importlib
+
+        surface = importlib.import_module(f"platforms.{platform}.drift")
+        assert drift.check_action_ids([], surface)["observed"] == []
+        assert surface.EXPECTED_ENDPOINTS, platform
+        assert surface.SELECTORS_BY_STAGE, platform
+        # 端点三元组的形状：(method, host, path)
+        for method, host, path in surface.EXPECTED_ENDPOINTS + surface.OPTIONAL_ENDPOINTS:
+            assert method.isupper() and "://" not in host and path.startswith("/")
+
+    @pytest.mark.parametrize("platform", LIST_SELECTOR_PLATFORMS)
+    def test_selectors_come_from_the_live_modules(self, platform):
+        """声明必须是 import 来的，不能是手抄的副本。"""
+        import importlib
+
+        surface = importlib.import_module(f"platforms.{platform}.drift")
+        dom = importlib.import_module(f"platforms.{platform}.dom")
+        assert surface.SELECTORS_BY_STAGE["otp"] == tuple(dom.OTP_INPUT_SELECTORS)
+        assert surface.SELECTORS_BY_STAGE["password"] == tuple(dom.PASSWORD_INPUT_SELECTORS)
+
+    def test_kiro_pins_the_aws_spa_step_names(self):
+        """AWS 改了 hash 里的步骤名，steps.py 的守卫会全部失效且**不报错**。"""
+        from platforms.kiro import drift as surface, steps
+
+        assert set(surface.SIGNUP_HASH_STEPS) == {
+            steps.dom.STEP_ENTER_EMAIL,
+            steps.dom.STEP_ENTER_NAME,
+            steps.dom.STEP_VERIFY_EMAIL,
+            steps.dom.STEP_CREATE_PASSWORD,
+        }
+
+    def test_windsurf_pins_the_two_response_paths_the_result_comes_from(self):
+        """注册结果不在 DOM 上；这两个路径改了会"看上去成功"但拿不到 token。"""
+        from platforms.windsurf import dom, drift as surface
+
+        assert surface.RESULT_RESPONSE_PATHS == (dom.EMAIL_COMPLETE_PATH, dom.POST_AUTH_PATH)
+
+    def test_tavily_pins_the_regex_that_finds_the_signup_entry(self):
+        """入口 URL 带一次性 state，只能从 sign-in 页 HTML 里抠；正则漂了就卡在第一步。"""
+        import inspect
+
+        from platforms.tavily import dom, drift as surface
+
+        assert surface.SIGNUP_LINK_PATTERN in inspect.getsource(dom.extract_signup_url)
+
+    def test_openblocklabs_pins_the_hardcoded_workos_client_id(self):
+        from platforms.openblocklabs import dom, drift as surface
+
+        assert surface.KNOWN_CLIENT_ID == dom.CLIENT_ID
+
+    def test_grok_keeps_the_protocol_action_id_visible(self):
+        """浏览器路径不打 server action，但它漂了协议路径就废，所以一并盯着。"""
+        from platforms.grok import core, drift as surface
+
+        assert surface.known_actions() == {"signup": core.NEXT_ACTION}
+
+    def test_trae_hosts_agree_between_the_two_paths(self):
+        """协议路径与浏览器路径写死的域名必须是同一批——import 时就断言了，这里固定住。"""
+        from platforms.trae import core, dom
+
+        assert core.BASE_URL == f"https://{dom.TRAE_PASSPORT_DOMAIN}"
+        assert core.API_SG == dom.TRAE_API_SG

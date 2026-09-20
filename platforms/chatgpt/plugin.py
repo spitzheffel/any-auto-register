@@ -158,21 +158,28 @@ class ChatGPTPlatform(BasePlatform):
         )
 
     def build_browser_registration_adapter(self):
+        def _build_flow():
+            from platforms.chatgpt.steps import build_flow
+
+            return build_flow()
+
+        def _build_obstacles():
+            from platforms.chatgpt.obstacles import build_obstacles
+
+            return build_obstacles()
+
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_chatgpt_result(result),
-            browser_worker_builder=lambda ctx, artifacts: __import__("platforms.chatgpt.browser_register", fromlist=["ChatGPTBrowserRegister"]).ChatGPTBrowserRegister(
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                phone=artifacts.phone,
-                log_fn=ctx.log,
-            ),
-            browser_register_runner=lambda worker, ctx, artifacts: worker.run(
-                email=ctx.identity.email or "",
-                password=ctx.password or "",
-            ),
+            step_flow_builder=_build_flow,
+            obstacle_builder=_build_obstacles,
+            # Camoufox 的指纹体系是过 OpenAI 风控的前提，不接受静默换成 Chromium
+            engine_preference="camoufox",
+            allow_engine_fallback=False,
+            # 带代理时让 Camoufox 按出口 IP 对齐时区 / 语言（旧 worker 同行为）
+            engine_options={"geoip": True},
             oauth_runner=self._run_protocol_oauth,
             capability=RegistrationCapability(oauth_headless_requires_browser_reuse=True),
+            # Step 路径由 run_step_flow 把它接到 otp 能力的 builder 上
             otp_spec=OtpSpec(wait_message="等待验证码...", timeout=600),
         )
 

@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, Sequence
 from urllib.parse import urlsplit
 
-from core.cancellation import NEVER, CancellationToken
+from core.cancellation import (
+    NEVER,
+    CancellationToken,
+    accepts_should_stop,
+    cancellable_sleep,
+    poll_until,
+)
 from core.errors import (
     AttemptCancelled,
     ConfigError,
@@ -30,7 +36,12 @@ from core.errors import (
 )
 from core.requirements import CAPABILITY_CHANNEL
 
+from .dom import find_first_selector, find_first_visible
+
 from .runtime import call_log
+
+#: 辅助浏览器会话在 sc.handles 里的键前缀
+AUX_BROWSER_PREFIX = "aux_browser:"
 
 # 事件 detail 与检查点里一律脱敏
 SENSITIVE_KEYS = frozenset(
@@ -556,6 +567,19 @@ class ArtifactCollector:
             except Exception:
                 pass
 
+        aux_pages = dict(getattr(sc, "aux_pages", None) or {})
+        for aux_name, aux_page in aux_pages.items():
+            safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in str(aux_name))
+            try:
+                aux_page.screenshot(path=str(directory / f"screenshot-{safe}.png"))
+            except Exception:
+                pass
+            try:
+                with gzip.open(directory / f"page-{safe}.html.gz", "wt", encoding="utf-8") as handle:
+                    handle.write(aux_page.content())
+            except Exception:
+                pass
+
         self._dump(directory / "network.json", (self.network.entries if self.network else []))
         self._dump(directory / "console.json", self.console)
         self._dump(
@@ -568,6 +592,7 @@ class ArtifactCollector:
                 "page_url": _safe_page_url(page),
                 "state": redact(sc.state),
                 "channels_used": dict(getattr(sc.resolver, "channels_used", {}) or {}),
+                "aux_pages": {name: _safe_page_url(p) for name, p in aux_pages.items()},
             },
         )
         return str(directory)
@@ -642,6 +667,7 @@ class StepContext:
         human: HumanChannel | None = None,
         state: dict | None = None,
         attempt_id: str = "",
+        launch_spec: Any = None,
     ):
         runtime = getattr(ctx, "runtime", None)
         self.ctx = ctx
@@ -654,6 +680,10 @@ class StepContext:
         self.state: dict[str, Any] = dict(state or {})
         #: 不可序列化的活对象：lease、solver 实例、浏览器会话
         self.handles: dict[str, Any] = {}
+        #: core.browser_engine.BrowserLaunchSpec —— 主会话的启动参数，开辅助会话要用
+        self.launch_spec = launch_spec
+        #: 辅助浏览器的页面（名字 -> page），失败现场包会一并截图
+        self.aux_pages: dict[str, Any] = {}
         #: 资源引用（activation_id / 邮箱账号），供重启后回收
         self.resource_refs: dict[str, Any] = dict(getattr(runtime, "resource_refs", None) or {})
         self.attempt_id = attempt_id or str(getattr(runtime, "attempt_id", "") or "")
@@ -664,6 +694,8 @@ class StepContext:
         self._log_fn = getattr(runtime, "log", None) or getattr(ctx, "log", print)
         # 由 StepRunner 注入：步骤中途占用外部资源后立刻落检查点
         self._checkpoint_now: Callable[[], None] | None = None
+        # 由 StepRunner 注入：辅助浏览器开出来后也挂上现场采集
+        self._artifacts: Any = None
 
     # ------------------------------------------------------------------
     def require(self, name: str) -> Any:
@@ -684,6 +716,106 @@ class StepContext:
         """步骤中途显式落一次检查点（租到号码之后、释放之后）。"""
         if self._checkpoint_now is not None:
             self._checkpoint_now()
+
+    # ------------------------------------------------------------------
+    # 可取消等待：步骤里一律用这几个，不要裸 time.sleep / while True
+    # ------------------------------------------------------------------
+
+    def sleep(self, seconds: float) -> None:
+        cancellable_sleep(seconds, should_stop=self.cancel)
+
+    def poll(self, predicate: Callable[[], Any], *, timeout: float, interval: float = 0.5) -> Any:
+        return poll_until(predicate, timeout=timeout, interval=interval, should_stop=self.cancel)
+
+    def wait_for_selector(
+        self,
+        selectors,
+        *,
+        timeout: float = 30,
+        interval: float = 0.5,
+        page: Any = None,
+        visible: bool = True,
+    ) -> str | None:
+        """等到任一选择器命中，返回命中的那一个。"""
+        target = self.page if page is None else page
+        if isinstance(selectors, str):
+            selectors = (selectors,)
+        if visible:
+            probe = lambda: find_first_visible(target, selectors)[1]  # noqa: E731
+        else:
+            probe = lambda: find_first_selector(target, selectors)  # noqa: E731
+        return self.poll(probe, timeout=timeout, interval=interval)
+
+    def wait_for_url(self, substring: str, *, timeout: float = 60, interval: float = 1.0, page: Any = None) -> bool:
+        target = self.page if page is None else page
+        return bool(
+            self.poll(
+                lambda: substring in str(getattr(target, "url", "") or ""),
+                timeout=timeout,
+                interval=interval,
+            )
+        )
+
+    def call_with_cancel(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """调用可能支持 should_stop 的回调（otp_callback / wait_code / acquire ...）。
+
+        按签名判断而不是试错：不支持的实现照旧跑满自己的 timeout。
+        """
+        if accepts_should_stop(fn):
+            kwargs.setdefault("should_stop", self.cancel)
+        return fn(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # 辅助浏览器：主会话之外再开一个隔离会话
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _aux_key(name: str) -> str:
+        return f"{AUX_BROWSER_PREFIX}{name}"
+
+    def open_aux_browser(self, name: str = "aux"):
+        """按主会话的参数再开一个隔离浏览器，返回它的 page。
+
+        用在"必须换一个干净上下文"的场景：ChatGPT 注册完的上下文直接做 OAuth
+        会 NS_BINDING_ABORTED，旧实现为此在 worker 里自己 new 了第二个 Camoufox，
+        引擎完全看不见它。走这里开出来的会话记在 handles 里，步骤的 compensate
+        与 run_step_flow 的 finally 都会兜底关，失败现场包也会带上它的截图。
+        """
+        if self.launch_spec is None:
+            raise StepContractError("当前运行环境未记录浏览器启动参数，无法开辅助浏览器")
+        # 幂等：重试进来时先把上一轮的关掉，否则每次重试泄漏一个浏览器进程
+        self.close_aux_browser(name)
+        self.cancel.raise_if_cancelled()
+        session = self.launch_spec.start()
+        page = session.new_page()
+        self.handles[self._aux_key(name)] = session
+        self.aux_pages[name] = page
+        if self._artifacts is not None:
+            self._artifacts.attach(page)
+        self.emit(
+            "aux_browser_opened",
+            {"name": name, "engine": str(getattr(session, "engine", ""))},
+            message=f"打开辅助浏览器 {name}",
+        )
+        return page
+
+    def close_aux_browser(self, name: str = "aux") -> None:
+        session = self.handles.pop(self._aux_key(name), None)
+        self.aux_pages.pop(name, None)
+        if session is None:
+            return
+        try:
+            session.close()
+        except Exception:
+            pass
+        self.emit("aux_browser_closed", {"name": name}, message=f"关闭辅助浏览器 {name}")
+
+    def close_aux_browsers(self) -> None:
+        """兜底关掉所有辅助会话（补偿没跑到时由 run_step_flow 的 finally 调用）。"""
+        prefix_len = len(AUX_BROWSER_PREFIX)
+        for key in [k for k in list(self.handles) if str(k).startswith(AUX_BROWSER_PREFIX)]:
+            self.close_aux_browser(str(key)[prefix_len:])
+        self.aux_pages.clear()
 
     def log(self, message: str, *, level: str = "info", detail: dict | None = None) -> None:
         payload = {"step": self.current_step, "attempt_id": self.attempt_id}
@@ -740,6 +872,7 @@ class StepRunner:
                 self._write_checkpoint(sc, cursor, current, phase="running")
 
         sc._checkpoint_now = _checkpoint_now
+        sc._artifacts = self.artifacts
 
         try:
             while cursor < len(self.flow.steps):
@@ -787,6 +920,7 @@ class StepRunner:
             raise
         finally:
             sc._checkpoint_now = None
+            sc._artifacts = None
 
     # ------------------------------------------------------------------
     def _execute_with_retry(self, sc: StepContext, step: Step) -> StepResult:
@@ -891,10 +1025,7 @@ class StepRunner:
         return None
 
     def _sleep(self, sc: StepContext, seconds: float) -> None:
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            sc.cancel.raise_if_cancelled()
-            time.sleep(min(0.2, max(0.0, deadline - time.time())))
+        sc.sleep(seconds)
 
     # ------------------------------------------------------------------
     def _do_rewind(
