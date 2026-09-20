@@ -6,7 +6,7 @@ from core.base_platform import Account, RegisterConfig
 from infrastructure.provider_settings_repository import ProviderSettingsRepository
 from providers.captcha.local_solver import LocalSolverCaptcha
 from platforms.windsurf.plugin import WindsurfPlatform
-from platforms.windsurf.browser_register import WindsurfBrowserRegister
+from platforms.windsurf.dom import split_name
 from platforms.windsurf.browser_register import WindsurfStripeCheckoutBrowser
 from platforms.windsurf.browser_register import _extract_stripe_redirect_url
 from platforms.windsurf.core import (
@@ -524,6 +524,7 @@ def test_windsurf_default_name_strips_digits_from_email_localpart():
 
 
 def test_windsurf_browser_split_name_sanitizes_non_letters():
-    assert WindsurfBrowserRegister._split_name("SyptKGB1") == ("Syptkgb", "User")
-    assert WindsurfBrowserRegister._split_name("a1b2 c3d4") == ("Ab", "Cd")
-    assert WindsurfBrowserRegister._split_name("1234") == ("Windsurf", "User")
+    # 注册流程迁到 Step 引擎后这个函数在 platforms/windsurf/dom.py
+    assert split_name("SyptKGB1") == ("Syptkgb", "User")
+    assert split_name("a1b2 c3d4") == ("Ab", "Cd")
+    assert split_name("1234") == ("Windsurf", "User")
