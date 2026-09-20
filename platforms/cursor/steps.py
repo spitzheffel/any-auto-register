@@ -14,6 +14,7 @@ import urllib.parse as urlparse
 import uuid
 
 from core.errors import ConfigError, ResourceRejectedError, SiteChangedError, TransientError
+from core.registration.dom import MOUSE_EVENT_PATCH
 from core.registration.steps import Flow, RetryPolicy, Step, StepContext, StepResult
 
 from .dom import (
@@ -37,24 +38,6 @@ OTP_SELECTORS = (
 )
 
 PHONE_SELECTORS = 'input[type="tel"], input[placeholder*="555"], input[autocomplete="tel"]'
-
-# CF Turnstile 会检测 CDP 触发的 MouseEvent.screenX == clientX，注入补丁骗过它
-MOUSE_EVENT_PATCH = """
-(function() {
-    var screenX = Math.floor(Math.random() * (1200 - 800 + 1)) + 800;
-    var screenY = Math.floor(Math.random() * (600 - 400 + 1)) + 400;
-    for (const proto of [MouseEvent.prototype, PointerEvent.prototype]) {
-        Object.defineProperty(proto, 'screenX', {
-            get: function() { return this.clientX + screenX; },
-            configurable: true
-        });
-        Object.defineProperty(proto, 'screenY', {
-            get: function() { return this.clientY + screenY; },
-            configurable: true
-        });
-    }
-})();
-"""
 
 
 def _random_name() -> str:
@@ -328,7 +311,7 @@ class AwaitAndFillEmailOtp(Step):
             raise ConfigError("Cursor 注册需要邮箱验证码，但未配置 mailbox provider")
 
         sc.log("等待邮箱验证码")
-        code = otp_callback(should_stop=sc.cancel) if _accepts_should_stop(otp_callback) else otp_callback()
+        code = sc.call_with_cancel(otp_callback)
         if not code:
             raise TransientError("未获取到邮箱验证码")
         sc.log(f"验证码: {code}")
@@ -384,14 +367,6 @@ class ExtractSessionToken(Step):
         sc.state["resolved_email"] = resolved_email
         return StepResult.ok()
 
-
-def _accepts_should_stop(callback) -> bool:
-    import inspect
-
-    try:
-        return "should_stop" in inspect.signature(callback).parameters
-    except (TypeError, ValueError):
-        return False
 
 
 def build_flow() -> Flow:

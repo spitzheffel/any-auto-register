@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -49,8 +48,10 @@ class _FakePage:
 
 
 class _FakeSession:
-    def __init__(self):
+    def __init__(self, **launch_kwargs):
         self.closed = False
+        self.engine = str(launch_kwargs.get("engine") or "fake")
+        self.launch_kwargs = dict(launch_kwargs)
 
     def new_page(self):
         return _FakePage()
@@ -204,12 +205,13 @@ class _TokenStep(Step):
         return StepResult.ok()
 
 
-def _adapter(phone: _FakePhone, steps: list[Step]):
+def _adapter(phone: _FakePhone, steps: list[Step], *, engine_options=None):
     flow = Flow("wiring", steps, initial_keys=("email", "password"), result_keys=("token",))
     return BrowserRegistrationAdapter(
         result_mapper=lambda ctx, raw: raw,
         step_flow_builder=lambda: flow,
         obstacle_builder=lambda: [],
+        engine_options=dict(engine_options or {}),
     ), phone
 
 
@@ -217,18 +219,23 @@ def _adapter(phone: _FakePhone, steps: list[Step]):
 def fake_engine(monkeypatch):
     sessions: list[_FakeSession] = []
 
-    @contextmanager
     def _start_browser(**kwargs):
-        session = _FakeSession()
+        session = _FakeSession(**kwargs)
         sessions.append(session)
-        yield session
-        session.close()
+        return session
 
     monkeypatch.setattr(browser_engine, "start_browser", _start_browser)
     return sessions
 
 
-def _run(phone: _FakePhone, steps: list[Step], *, tmp_path, checkpoint_writes: list | None = None):
+def _run(
+    phone: _FakePhone,
+    steps: list[Step],
+    *,
+    tmp_path,
+    checkpoint_writes: list | None = None,
+    engine_options=None,
+):
     """走生产装配：create_task → TaskLogger → build_step_runtime → BasePlatform.log → run_step_flow。"""
     task = create_task(task_type="register", platform="wiring", payload={"extra": {}}, progress_total=1)
     logger = TaskLogger(task["id"])
@@ -271,7 +278,7 @@ def _run(phone: _FakePhone, steps: list[Step], *, tmp_path, checkpoint_writes: l
             log_fn=platform.log,
             runtime=runtime,
         )
-        adapter, _ = _adapter(phone, steps)
+        adapter, _ = _adapter(phone, steps, engine_options=engine_options)
         try:
             result = run_step_flow(ctx, adapter)
             error = None
@@ -517,3 +524,51 @@ class TestSecretsStayOutOfTheApi:
         dumped = repr(payload)
         assert "secret-session-token" not in dumped
         assert "Passw0rd!" not in dumped
+
+
+class _OpensAuxStep(Step):
+    """开辅助浏览器但故意不关，验证 run_step_flow 的 finally 兜底。"""
+
+    name = "OpensAux"
+    writes = ("token",)
+
+    def run(self, sc):
+        page = sc.open_aux_browser("codex_oauth")
+        sc.state["token"] = f"tok-{getattr(page, 'url', '')[-6:]}"
+        return StepResult.ok()
+
+
+class _AuxThenFailStep(Step):
+    name = "AuxThenFail"
+
+    def run(self, sc):
+        sc.open_aux_browser("codex_oauth")
+        raise TransientError("OAuth 没跟到 callback")
+
+
+class TestAuxBrowserLifecycle:
+    def test_leaked_aux_browser_is_closed_by_run_step_flow(self, fake_engine, tmp_path):
+        phone = _FakePhone()
+        _, _, result, error = _run(phone, [_OpensAuxStep()], tmp_path=tmp_path)
+
+        assert error is None and result["token"].startswith("tok-")
+        assert len(fake_engine) == 2  # 主会话 + 辅助会话
+        assert all(session.closed for session in fake_engine)
+
+    def test_aux_browser_is_closed_when_the_step_fails(self, fake_engine, tmp_path):
+        phone = _FakePhone()
+        _, _, _, error = _run(phone, [_AuxThenFailStep(), _TokenStep()], tmp_path=tmp_path)
+
+        assert isinstance(error, TransientError)
+        assert len(fake_engine) >= 2
+        assert all(session.closed for session in fake_engine)
+
+    def test_aux_browser_reuses_the_main_launch_parameters(self, fake_engine, tmp_path):
+        phone = _FakePhone()
+        _run(phone, [_OpensAuxStep()], tmp_path=tmp_path, engine_options={"geoip": True})
+
+        main, aux = fake_engine
+        # engine_options 要到得了 start_browser，辅助会话跟主会话用同一份参数
+        assert main.launch_kwargs["geoip"] is True
+        assert main.launch_kwargs["headless"] is True
+        assert aux.launch_kwargs == main.launch_kwargs

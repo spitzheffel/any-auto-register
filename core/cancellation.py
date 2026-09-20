@@ -75,3 +75,65 @@ class CancellationToken:
 
 #: 永不取消的空令牌，供未接入取消的调用方使用
 NEVER = CancellationToken(probe=None)
+
+
+def accepts_should_stop(fn) -> bool:
+    """判断某个可调用是否接受 should_stop（未接入的实现退化为跑满 timeout）。
+
+    按签名判断而不是靠捕获 TypeError：后者会把被调函数内部抛的任何 TypeError
+    误判成"签名不匹配"并静默退化成不可取消的等待。
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "should_stop" in params:
+        return True
+    return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+
+
+def _raise_if_stopped(should_stop) -> None:
+    """should_stop 可以是 CancellationToken，也可以是裸谓词。"""
+    if should_stop is None:
+        return
+    raiser = getattr(should_stop, "raise_if_cancelled", None)
+    if raiser is not None:
+        raiser()
+        return
+    if should_stop():
+        raise AttemptCancelled("等待期间任务被取消")
+
+
+def cancellable_sleep(seconds: float, *, should_stop=None, tick: float = 0.2) -> None:
+    """可被取消打断的 sleep。
+
+    页面流程里大量的 ``time.sleep(2)`` 是任务取消最主要的延迟来源：令牌早就
+    翻了，线程还在睡。按 tick 切片轮询，取消时立刻抛 AttemptCancelled。
+    """
+    deadline = time.time() + max(0.0, float(seconds))
+    while True:
+        _raise_if_stopped(should_stop)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(max(0.0, float(tick)), remaining))
+
+
+def poll_until(predicate: Callable[[], object], *, timeout: float, interval: float = 0.5, should_stop=None):
+    """轮询到 predicate 返回真值为止，超时返回 None。
+
+    先判一次再睡：页面往往已经是目标状态，没必要白等一个 interval。
+    predicate 自己抛的异常照常上抛——要吞的话在 predicate 里吞，
+    在这里统一吞会把"选择器写错了"变成"超时"。
+    """
+    deadline = time.time() + max(0.0, float(timeout))
+    while True:
+        _raise_if_stopped(should_stop)
+        value = predicate()
+        if value:
+            return value
+        if time.time() >= deadline:
+            return None
+        cancellable_sleep(min(float(interval), max(0.0, deadline - time.time())), should_stop=should_stop)

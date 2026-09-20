@@ -40,6 +40,8 @@ class BrowserRegistrationAdapter:
     obstacle_builder: Callable[[], Any] | None = None
     engine_preference: str = ""
     allow_engine_fallback: bool = False
+    #: 引擎特有的额外启动参数（例如 camoufox 的 geoip），主会话与辅助会话共用
+    engine_options: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
