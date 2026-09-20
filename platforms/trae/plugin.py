@@ -6,6 +6,12 @@ from core.registration.helpers import resolve_timeout
 from core.registry import register
 
 
+def _build_flow():
+    from platforms.trae.steps import build_flow
+
+    return build_flow()
+
+
 @register
 class TraePlatform(BasePlatform):
     name = "trae"
@@ -54,16 +60,11 @@ class TraePlatform(BasePlatform):
     def build_browser_registration_adapter(self):
         return BrowserRegistrationAdapter(
             result_mapper=lambda ctx, result: self._map_trae_result(result),
-            browser_worker_builder=lambda ctx, artifacts: __import__("platforms.trae.browser_register", fromlist=["TraeBrowserRegister"]).TraeBrowserRegister(
-                headless=(ctx.executor_type == "headless"),
-                proxy=ctx.proxy,
-                otp_callback=artifacts.otp_callback,
-                log_fn=ctx.log,
-            ),
-            browser_register_runner=lambda worker, ctx, artifacts: worker.run(
-                email=ctx.identity.email or "",
-                password=ctx.password or "",
-            ),
+            step_flow_builder=_build_flow,
+            # ByteDance 的风控看指纹，回退到普通 Chromium 会稳定卡在验证；
+            # Trae 没有 Cloudflare 全页拦截，所以也不挂 obstacle handler
+            engine_preference="camoufox",
+            allow_engine_fallback=False,
             oauth_runner=self._run_protocol_oauth,
             capability=RegistrationCapability(oauth_allowed_executor_types=("headed",)),
             otp_spec=OtpSpec(wait_message="等待验证码..."),
