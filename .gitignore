@@ -69,6 +69,7 @@ AGENTS.md
 .trellis/
 .windsurf/
 .qoder/
+.codex/
 # .cursor 下只有领域 skill 入库（由 scripts/sync_skills.py 从 .agents/skills 镜像），
 # hooks / mcp / 个人配置继续留在本地
 .cursor/*
@@ -85,6 +86,12 @@ AGENTS.md
 !.agents/skills/platform-drift-check/
 !.agents/skills/platform-from-capture/
 !.agents/skills/failure-triage/
+# CodeGraph 的本地索引：目录自带 .gitignore（* + !.gitignore），但那个文件本身可跟踪，
+# 所以整个目录仍会以未跟踪出现，在这里整个挡掉
+.codegraph/
+# 本地分析报告与参考材料。里面的抓包分析引用了会话库的内容，而原始库存着明文凭据，
+# 一律不入库
+refs/
 docs/REFACTOR-PLAN.md
 
 # 敏感文件
