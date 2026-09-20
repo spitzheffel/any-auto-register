@@ -101,7 +101,10 @@ def check_action_ids(entries: list[dict], surface) -> dict[str, Any]:
 
     known = surface.known_actions()
     cached: dict[str, str] = {}
+    # 没有 server action 层的平台（如 ChatGPT）返回 None，不必去猜缓存路径
     cache_path = surface.action_cache_path()
+    if not cache_path:
+        return {"observed": [], "steps_not_seen": [], "known": {}, "cached": {}}
     try:
         cached = dict((json.loads(Path(cache_path).read_text(encoding="utf-8")) or {}).get("confirmed") or {})
     except Exception:

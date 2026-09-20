@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from core.base_platform import RegisterConfig
-from platforms.chatgpt import browser_register as browser_register_module
 from platforms.chatgpt.plugin import (
     ChatGPTPlatform,
     _assert_complete_oauth_callback,
@@ -78,39 +77,20 @@ def test_protocol_mailbox_mapper_rejects_partial_oauth_result():
         adapter.result_mapper(ctx, result)
 
 
-def test_browser_register_run_rejects_session_fallback(monkeypatch):
-    class FakePage:
-        def __init__(self):
-            self.url = "about:blank"
-            self.context = SimpleNamespace(cookies=lambda: [])
+def test_browser_adapter_runs_through_the_step_engine():
+    """适配器必须带 step_flow_builder。
 
-        def goto(self, url, **kwargs):
-            self.url = url
+    它是 core/registration/flows.py 里新旧两条路径的分叉点：没它就回到旧的
+    整段式 worker，取消令牌 / 检查点 / 失败现场 / 人工通道全部拿不到。
+    """
+    platform = object.__new__(ChatGPTPlatform)
+    adapter = platform.build_browser_registration_adapter()
 
-    class FakeBrowser:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def new_page(self):
-            return FakePage()
-
-    monkeypatch.setattr(browser_register_module, "Camoufox", lambda **kwargs: FakeBrowser())
-    monkeypatch.setattr(browser_register_module, "_browser_registration_flow", lambda *args, **kwargs: {"page_type": "chatgpt_home"})
-    monkeypatch.setattr(browser_register_module, "_click_first", lambda page, selectors, timeout=3: setattr(page, "url", "https://auth.openai.com/log-in") or selectors[0])
-    monkeypatch.setattr(browser_register_module, "_get_cookies", lambda page: {})
-    monkeypatch.setattr(browser_register_module, "_do_codex_oauth", lambda *args, **kwargs: None)
-    monkeypatch.setattr(browser_register_module.ChatGPTBrowserRegister, "_retry_oauth_fresh_browser", lambda self, email, password: None)
-    monkeypatch.setattr(browser_register_module.time, "sleep", lambda seconds: None)
-
-    worker = browser_register_module.ChatGPTBrowserRegister(
-        headless=True,
-        proxy=None,
-        otp_callback=None,
-        log_fn=lambda message: None,
-    )
-
-    with pytest.raises(RuntimeError, match="已拒绝回退"):
-        worker.run(email="user@example.com", password="Secret123!")
+    assert adapter.step_flow_builder is not None
+    assert adapter.obstacle_builder is not None
+    assert adapter.browser_worker_builder is None
+    # Camoufox 的指纹体系是过 OpenAI 风控的前提，不接受静默换成 Chromium
+    assert adapter.engine_preference == "camoufox"
+    assert adapter.allow_engine_fallback is False
+    assert adapter.engine_options == {"geoip": True}
+    assert adapter.step_flow_builder().name == "chatgpt.browser_signup"

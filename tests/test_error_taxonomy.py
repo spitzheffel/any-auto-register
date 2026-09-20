@@ -55,11 +55,29 @@ class TestClassification:
 
 class TestPlatformExceptionsAreClassified:
     def test_phone_rejection_is_resource_rejected(self):
-        from platforms.chatgpt.browser_register import PhoneRejectedError
+        from platforms.chatgpt.errors import PhoneRejectedError
 
         exc = PhoneRejectedError("手机号被拒绝")
         assert isinstance(exc, ResourceRejectedError)
         assert is_retryable(exc) is True
+
+    def test_phone_code_timeout_is_transient(self):
+        # 换号重试还是换一次尝试，全看这个分类
+        from core.errors import TransientError
+        from platforms.chatgpt.errors import PhoneCodeTimeout
+
+        exc = PhoneCodeTimeout("未收到短信验证码")
+        assert isinstance(exc, TransientError)
+        assert classify(exc) == "transient"
+
+    def test_site_text_drives_the_classification(self):
+        from core.errors import RiskControlError, TransientError
+        from platforms.chatgpt.errors import error_from_auth_text
+
+        assert isinstance(error_from_auth_text("Sorry, we cannot create your account"), RiskControlError)
+        assert isinstance(error_from_auth_text("Please try again"), TransientError)
+        # 拿不准时退到 default，而不是拿 unknown 堵住重试
+        assert classify(error_from_auth_text("")) == "transient"
 
     def test_registration_config_errors_are_fatal(self):
         from core.registration.errors import (
